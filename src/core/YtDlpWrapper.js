@@ -110,14 +110,15 @@ async function getVideoInfo(url) {
  */
 async function getStreamUrl(url) {
   const raw = await run([
-    '-f', 'bestaudio/best',
     '--no-playlist',
     '--no-warnings',
     '-g',
     ...extraArgs(),
     url,
   ]);
-  return raw.trim().split('\n')[0];
+  // yt-dlp may return multiple URLs (video + audio for DASH) — take the last one which is audio
+  const lines = raw.trim().split('\n').filter(Boolean);
+  return lines[lines.length - 1];
 }
 
 module.exports = { search, getVideoInfo, getStreamUrl };
