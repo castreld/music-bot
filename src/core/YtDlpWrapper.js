@@ -22,7 +22,7 @@ if (process.env.YOUTUBE_COOKIES) {
  * @returns {string[]}
  */
 function extraArgs() {
-  const args = ['--extractor-args', 'youtube:player_client=tv_embedded'];
+  const args = [];
   if (fs.existsSync(COOKIES_FILE)) args.push('--cookies', COOKIES_FILE);
   return args;
 }
