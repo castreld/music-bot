@@ -16,11 +16,15 @@ if (process.env.YOUTUBE_COOKIES) {
 }
 
 /**
- * Returns cookie args to append to every yt-dlp call if available.
+ * Returns extra args to append to every yt-dlp call.
+ * Always uses iOS player client to reduce bot detection.
+ * Adds cookies if available.
  * @returns {string[]}
  */
-function cookieArgs() {
-  return fs.existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : [];
+function extraArgs() {
+  const args = ['--extractor-args', 'youtube:player_client=ios,web'];
+  if (fs.existsSync(COOKIES_FILE)) args.push('--cookies', COOKIES_FILE);
+  return args;
 }
 
 /**
@@ -56,7 +60,7 @@ async function search(query, limit = 5) {
     '--flat-playlist',
     '--no-playlist',
     '--no-warnings',
-    ...cookieArgs(),
+    ...extraArgs(),
   ]);
 
   return raw
@@ -85,7 +89,7 @@ async function getVideoInfo(url) {
     '--dump-json',
     '--no-playlist',
     '--no-warnings',
-    ...cookieArgs(),
+    ...extraArgs(),
     url,
   ]);
 
@@ -110,7 +114,7 @@ async function getStreamUrl(url) {
     '--no-playlist',
     '--no-warnings',
     '-g',
-    ...cookieArgs(),
+    ...extraArgs(),
     url,
   ]);
   return raw.trim().split('\n')[0];
