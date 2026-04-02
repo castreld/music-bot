@@ -116,11 +116,10 @@ async function getVideoInfo(url) {
 function createAudioStream(url) {
   return spawn(YT_DLP, [
     '--no-playlist',
-    '--no-warnings',
     '-o', '-',
     ...extraArgs(),
     url,
-  ], { stdio: ['ignore', 'pipe', 'ignore'] });
+  ], { stdio: ['ignore', 'pipe', 'pipe'] }); // pipe stderr so caller can log it
 }
 
 module.exports = { search, getVideoInfo, createAudioStream };

@@ -130,6 +130,8 @@ class MusicPlayer {
     try {
       // Step 1: yt-dlp pipes raw audio to stdout
       const ytdlp = YtDlp.createAudioStream(track.url);
+      ytdlp.stderr.on('data', d => console.error(`[ytdlp] ${d.toString().trim()}`));
+      ytdlp.on('close', code => { if (code !== 0) console.error(`[ytdlp] exited with code ${code}`); });
 
       // Step 2: FFmpeg reads from stdin, outputs PCM to stdout
       const ffmpeg = spawn(FFMPEG, [
@@ -139,7 +141,9 @@ class MusicPlayer {
         '-ar', '48000',
         '-ac', '2',
         'pipe:1',
-      ], { stdio: ['pipe', 'pipe', 'ignore'] });
+      ], { stdio: ['pipe', 'pipe', 'pipe'] });
+      ffmpeg.stderr.on('data', d => console.error(`[ffmpeg] ${d.toString().trim()}`));
+      ffmpeg.on('close', code => { if (code !== 0) console.error(`[ffmpeg] exited with code ${code}`); });
 
       ytdlp.stdout.pipe(ffmpeg.stdin);
 
