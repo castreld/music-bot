@@ -77,19 +77,19 @@ async function getVideoInfo(url) {
 }
 
 /**
- * Spawn a yt-dlp process that streams audio to stdout.
- * The caller is responsible for reading .stdout.
+ * Get the direct audio stream URL for a video (no download).
  * @param {string} url
- * @returns {import('child_process').ChildProcessWithoutNullStreams}
+ * @returns {Promise<string>}
  */
-function createAudioStream(url) {
-  return spawn(YT_DLP, [
+async function getStreamUrl(url) {
+  const raw = await run([
     '-f', 'bestaudio[ext=webm]/bestaudio/best',
     '--no-playlist',
     '--no-warnings',
-    '-o', '-',
+    '-g',
     url,
-  ], { stdio: ['ignore', 'pipe', 'ignore'] });
+  ]);
+  return raw.trim().split('\n')[0];
 }
 
-module.exports = { search, getVideoInfo, createAudioStream };
+module.exports = { search, getVideoInfo, getStreamUrl };

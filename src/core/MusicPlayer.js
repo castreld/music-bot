@@ -10,8 +10,11 @@ const {
   StreamType,
   NoSubscriberBehavior,
 } = require('@discordjs/voice');
+const { spawn } = require('child_process');
 const { EmbedBuilder } = require('discord.js');
 const YtDlp = require('./YtDlpWrapper');
+
+const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const { nowPlayingEmbed, errorEmbed } = require('../utils/embeds');
 
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
@@ -122,15 +125,29 @@ class MusicPlayer {
     const track = trackOverride || this.queue[this.currentIndex];
     if (!track) return;
 
-    // Kill previous yt-dlp process
     this._killCurrentProcess();
 
     try {
-      const proc    = YtDlp.createAudioStream(track.url);
-      this._currentProcess = proc;
+      // Step 1: get direct CDN URL from yt-dlp
+      const streamUrl = await YtDlp.getStreamUrl(track.url);
 
-      const resource = createAudioResource(proc.stdout, {
-        inputType:    StreamType.Arbitrary,
+      // Step 2: pipe through FFmpeg → raw signed 16-bit PCM at 48kHz stereo
+      const ffmpeg = spawn(FFMPEG, [
+        '-reconnect',          '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max','5',
+        '-i',                  streamUrl,
+        '-vn',
+        '-f',                  's16le',
+        '-ar',                 '48000',
+        '-ac',                 '2',
+        'pipe:1',
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+
+      this._currentProcess = ffmpeg;
+
+      const resource = createAudioResource(ffmpeg.stdout, {
+        inputType:    StreamType.Raw,
         inlineVolume: true,
         metadata:     { track },
       });
