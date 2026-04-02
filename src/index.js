@@ -29,4 +29,6 @@ for (const file of fs.readdirSync(eventsDir).filter(f => f.endsWith('.js'))) {
   client[method](event.name, (...args) => event.execute(...args, client));
 }
 
-client.login(process.env.DISCORD_TOKEN);
+const token = process.env.DISCORD_TOKEN;
+console.log(`[Debug] TOKEN exists: ${!!token}, length: ${token?.length}, starts with: ${token?.slice(0, 10)}`);
+client.login(token);
