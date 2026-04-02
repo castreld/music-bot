@@ -1,6 +1,27 @@
 const { spawn } = require('child_process');
+const fs   = require('fs');
+const path = require('path');
 
-const YT_DLP = process.env.YT_DLP_PATH || 'yt-dlp';
+const YT_DLP      = process.env.YT_DLP_PATH || 'yt-dlp';
+const COOKIES_FILE = path.join('/tmp', 'yt-cookies.txt');
+
+// Write YouTube cookies from env var to disk once on startup
+if (process.env.YOUTUBE_COOKIES) {
+  try {
+    fs.writeFileSync(COOKIES_FILE, process.env.YOUTUBE_COOKIES, 'utf8');
+    console.log('[YtDlp] Cookies file written.');
+  } catch (e) {
+    console.error('[YtDlp] Failed to write cookies file:', e.message);
+  }
+}
+
+/**
+ * Returns cookie args to append to every yt-dlp call if available.
+ * @returns {string[]}
+ */
+function cookieArgs() {
+  return fs.existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : [];
+}
 
 /**
  * Run a yt-dlp command and collect stdout/stderr.
@@ -35,6 +56,7 @@ async function search(query, limit = 5) {
     '--flat-playlist',
     '--no-playlist',
     '--no-warnings',
+    ...cookieArgs(),
   ]);
 
   return raw
@@ -63,6 +85,7 @@ async function getVideoInfo(url) {
     '--dump-json',
     '--no-playlist',
     '--no-warnings',
+    ...cookieArgs(),
     url,
   ]);
 
@@ -87,6 +110,7 @@ async function getStreamUrl(url) {
     '--no-playlist',
     '--no-warnings',
     '-g',
+    ...cookieArgs(),
     url,
   ]);
   return raw.trim().split('\n')[0];
