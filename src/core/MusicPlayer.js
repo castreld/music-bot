@@ -128,23 +128,25 @@ class MusicPlayer {
     this._killCurrentProcess();
 
     try {
-      // Step 1: get direct CDN URL from yt-dlp
-      const streamUrl = await YtDlp.getStreamUrl(track.url);
+      // Step 1: yt-dlp pipes raw audio to stdout
+      const ytdlp = YtDlp.createAudioStream(track.url);
 
-      // Step 2: pipe through FFmpeg → raw signed 16-bit PCM at 48kHz stereo
+      // Step 2: FFmpeg reads from stdin, outputs PCM to stdout
       const ffmpeg = spawn(FFMPEG, [
-        '-reconnect',          '1',
-        '-reconnect_streamed', '1',
-        '-reconnect_delay_max','5',
-        '-i',                  streamUrl,
+        '-i',  'pipe:0',
         '-vn',
-        '-f',                  's16le',
-        '-ar',                 '48000',
-        '-ac',                 '2',
+        '-f',  's16le',
+        '-ar', '48000',
+        '-ac', '2',
         'pipe:1',
-      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+      ], { stdio: ['pipe', 'pipe', 'ignore'] });
 
-      this._currentProcess = ffmpeg;
+      ytdlp.stdout.pipe(ffmpeg.stdin);
+
+      // Kill both processes together
+      this._currentProcess = {
+        kill: () => { try { ytdlp.kill('SIGKILL'); } catch {} try { ffmpeg.kill('SIGKILL'); } catch {} },
+      };
 
       const resource = createAudioResource(ffmpeg.stdout, {
         inputType:    StreamType.Raw,
@@ -331,7 +333,7 @@ class MusicPlayer {
   }
 
   _killCurrentProcess() {
-    try { this._currentProcess?.kill('SIGKILL'); } catch { /* ignore */ }
+    try { this._currentProcess?.kill(); } catch { /* ignore */ }
     this._currentProcess = null;
   }
 

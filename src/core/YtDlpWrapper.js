@@ -108,17 +108,19 @@ async function getVideoInfo(url) {
  * @param {string} url
  * @returns {Promise<string>}
  */
-async function getStreamUrl(url) {
-  const raw = await run([
+/**
+ * Spawn yt-dlp piping raw audio to stdout. Pipe into FFmpeg for conversion.
+ * @param {string} url
+ * @returns {import('child_process').ChildProcessWithoutNullStreams}
+ */
+function createAudioStream(url) {
+  return spawn(YT_DLP, [
     '--no-playlist',
     '--no-warnings',
-    '-g',
+    '-o', '-',
     ...extraArgs(),
     url,
-  ]);
-  // yt-dlp may return multiple URLs (video + audio for DASH) — take the last one which is audio
-  const lines = raw.trim().split('\n').filter(Boolean);
-  return lines[lines.length - 1];
+  ], { stdio: ['ignore', 'pipe', 'ignore'] });
 }
 
-module.exports = { search, getVideoInfo, getStreamUrl };
+module.exports = { search, getVideoInfo, createAudioStream };
