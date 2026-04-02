@@ -110,7 +110,7 @@ async function getVideoInfo(url) {
  */
 async function getStreamUrl(url) {
   const raw = await run([
-    '-f', 'bestaudio[ext=webm]/bestaudio/best',
+    '-f', 'bestaudio/best',
     '--no-playlist',
     '--no-warnings',
     '-g',
