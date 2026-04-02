@@ -1,8 +1,8 @@
 FROM node:22-slim
 
-# Install ffmpeg and curl
+# Install ffmpeg, curl and SSL certificates
 RUN apt-get update && \
-    apt-get install -y ffmpeg curl --no-install-recommends && \
+    apt-get install -y ffmpeg curl ca-certificates --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
 # Download yt-dlp binary
