@@ -2,7 +2,14 @@
 
 // Only load .env locally — Railway/production sets env vars directly
 if (process.env.NODE_ENV !== 'production') require('dotenv').config();
+
 const { Client, Collection, GatewayIntentBits } = require('discord.js');
+const YouTube = require('./core/YoutubeWrapper');
+
+// Initialize YouTube auth before starting the bot
+YouTube.init().then(() => startBot()).catch(console.error);
+
+function startBot() {
 const fs   = require('fs');
 const path = require('path');
 
@@ -29,4 +36,5 @@ for (const file of fs.readdirSync(eventsDir).filter(f => f.endsWith('.js'))) {
   client[method](event.name, (...args) => event.execute(...args, client));
 }
 
-client.login(process.env.DISCORD_TOKEN);
+  client.login(process.env.DISCORD_TOKEN);
+}

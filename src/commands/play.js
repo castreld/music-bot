@@ -2,7 +2,7 @@
 
 const { SlashCommandBuilder } = require('discord.js');
 const PlayerManager = require('../core/PlayerManager');
-const YtDlp         = require('../core/YtDlpWrapper');
+const YtDlp         = require('../core/YoutubeWrapper');
 const { addedToQueueEmbed, nowPlayingEmbed, errorEmbed } = require('../utils/embeds');
 const { getUserVoiceChannel, isUrl } = require('../utils/validators');
 

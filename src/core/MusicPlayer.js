@@ -10,11 +10,8 @@ const {
   StreamType,
   NoSubscriberBehavior,
 } = require('@discordjs/voice');
-const { spawn } = require('child_process');
 const { EmbedBuilder } = require('discord.js');
-const YtDlp = require('./YtDlpWrapper');
-
-const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+const YouTube = require('./YoutubeWrapper');
 const { nowPlayingEmbed, errorEmbed } = require('../utils/embeds');
 
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
@@ -128,32 +125,11 @@ class MusicPlayer {
     this._killCurrentProcess();
 
     try {
-      // Step 1: yt-dlp pipes raw audio to stdout
-      const ytdlp = YtDlp.createAudioStream(track.url);
-      ytdlp.stderr.on('data', d => console.error(`[ytdlp] ${d.toString().trim()}`));
-      ytdlp.on('close', code => { if (code !== 0) console.error(`[ytdlp] exited with code ${code}`); });
+      const { stream, type } = await YouTube.createAudioStream(track.url);
+      this._currentProcess = { kill: () => { try { stream.destroy(); } catch {} } };
 
-      // Step 2: FFmpeg reads from stdin, outputs PCM to stdout
-      const ffmpeg = spawn(FFMPEG, [
-        '-i',  'pipe:0',
-        '-vn',
-        '-f',  's16le',
-        '-ar', '48000',
-        '-ac', '2',
-        'pipe:1',
-      ], { stdio: ['pipe', 'pipe', 'pipe'] });
-      ffmpeg.stderr.on('data', d => console.error(`[ffmpeg] ${d.toString().trim()}`));
-      ffmpeg.on('close', code => { if (code !== 0) console.error(`[ffmpeg] exited with code ${code}`); });
-
-      ytdlp.stdout.pipe(ffmpeg.stdin);
-
-      // Kill both processes together
-      this._currentProcess = {
-        kill: () => { try { ytdlp.kill('SIGKILL'); } catch {} try { ffmpeg.kill('SIGKILL'); } catch {} },
-      };
-
-      const resource = createAudioResource(ffmpeg.stdout, {
-        inputType:    StreamType.Raw,
+      const resource = createAudioResource(stream, {
+        inputType:    type,
         inlineVolume: true,
         metadata:     { track },
       });

@@ -15,6 +15,7 @@
     "genius-lyrics": "^4.4.6",
     "libsodium-wrappers": "^0.8.2",
     "opusscript": "^0.1.1",
+    "play-dl": "^1.9.7",
     "sodium-native": "^4.1.1",
     "tweetnacl": "^1.0.3"
   }

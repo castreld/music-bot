@@ -6,7 +6,7 @@ const {
   ButtonStyle,
 } = require('discord.js');
 const PlayerManager = require('../core/PlayerManager');
-const YtDlp        = require('../core/YtDlpWrapper');
+const YtDlp        = require('../core/YoutubeWrapper');
 const { errorEmbed, addedToQueueEmbed, queueEmbed } = require('../utils/embeds');
 const { getUserVoiceChannel } = require('../utils/validators');
 

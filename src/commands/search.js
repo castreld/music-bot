@@ -5,7 +5,7 @@ const {
   ActionRowBuilder,
   StringSelectMenuBuilder,
 } = require('discord.js');
-const YtDlp  = require('../core/YtDlpWrapper');
+const YtDlp  = require('../core/YoutubeWrapper');
 const { searchResultsEmbed, errorEmbed } = require('../utils/embeds');
 const { getUserVoiceChannel } = require('../utils/validators');
 const { truncate, formatDuration } = require('../utils/formatters');
