@@ -1,14 +1,15 @@
 'use strict';
 
-const { spawn }    = require('child_process');
+const { spawn }      = require('child_process');
 const { StreamType } = require('@discordjs/voice');
-const fs   = require('fs');
-const path = require('path');
+const playdl         = require('play-dl');
+const fs             = require('fs');
+const path           = require('path');
 
 const FFMPEG       = process.env.FFMPEG_PATH || 'ffmpeg';
 const COOKIES_FILE = path.join('/tmp', 'yt-cookies.txt');
 
-let yt = null; // Innertube client
+let yt = null; // Innertube client (search / info only)
 
 /**
  * Parse Netscape cookies.txt into a Cookie header string.
@@ -27,7 +28,7 @@ function parseCookieFile(filePath) {
 }
 
 /**
- * Initialize Innertube client. Call once at startup.
+ * Initialize clients. Call once at startup.
  */
 async function init() {
   if (process.env.YOUTUBE_COOKIES) {
@@ -39,16 +40,24 @@ async function init() {
     }
   }
 
-  // youtubei.js is ESM — use dynamic import
-  const { Innertube } = await import('youtubei.js');
+  // Set cookies for play-dl (streaming)
+  if (fs.existsSync(COOKIES_FILE)) {
+    try {
+      await playdl.setToken({ youtube: { cookie: parseCookieFile(COOKIES_FILE) } });
+      console.log('[YouTube] play-dl cookies set.');
+    } catch (e) {
+      console.error('[YouTube] Failed to set play-dl cookies:', e.message);
+    }
+  }
 
+  // youtubei.js is ESM — use dynamic import (search / info)
+  const { Innertube } = await import('youtubei.js');
   const opts = {};
   if (fs.existsSync(COOKIES_FILE)) {
     opts.cookie = parseCookieFile(COOKIES_FILE);
   }
-
   yt = await Innertube.create(opts);
-  console.log('[YouTube] Innertube client ready.');
+  console.log('[YouTube] Ready.');
 }
 
 /**
@@ -87,68 +96,46 @@ async function getVideoInfo(url) {
 }
 
 /**
- * Create a PCM audio stream for a YouTube URL via Innertube + FFmpeg.
+ * Create an audio stream for a YouTube URL via play-dl.
  * Returns { stream, type, kill }.
  * @param {string} url
  */
 async function createAudioStream(url) {
-  const id = extractId(url);
+  const info = await playdl.video_info(url);
+  console.log(`[YouTube] Streaming: ${info.video_details.title}`);
 
-  // Try multiple clients — each may return different format types
-  const clients = ['IOS', 'ANDROID', 'WEB'];
-  let streamUrl = null;
-  let title     = url;
+  const pdStream = await playdl.stream_from_info(info, { quality: 2 });
+  console.log(`[YouTube] Stream type: ${pdStream.type}`);
 
-  for (const client of clients) {
-    try {
-      // getInfo() initialises the JS player required for URL deciphering
-      const info     = await yt.getInfo(id, client);
-      title          = info.basic_info?.title ?? url;
-      const adaptive = info.streaming_data?.adaptive_formats ?? [];
-
-      console.log(`[YouTube] Client=${client} formats=${adaptive.length}`);
-
-      // Sort audio formats by bitrate (highest first), try each until one resolves
-      const audioFormats = adaptive
-        .filter(f => f.mime_type?.startsWith('audio/'))
-        .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
-
-      for (const f of audioFormats) {
-        try {
-          // decipher() is async — resolves the URL and applies n-challenge fix
-          const u = await f.decipher(yt.session.player);
-          if (typeof u === 'string' && u.startsWith('http')) {
-            streamUrl = u;
-            console.log(`[YouTube] Got URL via ${client}: itag=${f.itag} ${f.mime_type} ${f.bitrate}bps`);
-            break;
-          } else {
-            console.error(`[YouTube] itag=${f.itag} decipher returned non-URL: ${u}`);
-          }
-        } catch (urlErr) {
-          console.error(`[YouTube] itag=${f.itag} decipher error: ${urlErr.message}`);
-        }
-      }
-
-      if (streamUrl) break;
-    } catch (e) {
-      console.error(`[YouTube] Client ${client} error: ${e.message}`);
-    }
+  // OggOpus / WebmOpus — Discord can decode natively, no FFmpeg needed
+  if (pdStream.type === 'ogg/opus') {
+    return {
+      stream: pdStream.stream,
+      type:   StreamType.OggOpus,
+      kill:   () => { try { pdStream.stream.destroy(); } catch {} },
+    };
   }
 
-  if (!streamUrl) throw new Error('No streamable audio URL found from any client');
-  console.log(`[YouTube] Streaming: ${title}`);
+  if (pdStream.type === 'webm/opus') {
+    return {
+      stream: pdStream.stream,
+      type:   StreamType.WebmOpus,
+      kill:   () => { try { pdStream.stream.destroy(); } catch {} },
+    };
+  }
 
+  // Fallback: pipe arbitrary stream through FFmpeg → PCM
   const ffmpeg = spawn(FFMPEG, [
-    '-reconnect',          '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max','5',
-    '-i',                  streamUrl,
+    '-i',  'pipe:0',
     '-vn',
-    '-f',                  's16le',
-    '-ar',                 '48000',
-    '-ac',                 '2',
+    '-f',  's16le',
+    '-ar', '48000',
+    '-ac', '2',
     'pipe:1',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+  pdStream.stream.pipe(ffmpeg.stdin);
+  pdStream.stream.on('error', () => { try { ffmpeg.kill('SIGKILL'); } catch {} });
 
   ffmpeg.stderr.on('data', d => {
     const msg = d.toString().trim();
@@ -160,7 +147,10 @@ async function createAudioStream(url) {
   return {
     stream: ffmpeg.stdout,
     type:   StreamType.Raw,
-    kill:   () => { try { ffmpeg.kill('SIGKILL'); } catch {} },
+    kill:   () => {
+      try { pdStream.stream.destroy(); } catch {}
+      try { ffmpeg.kill('SIGKILL'); }    catch {}
+    },
   };
 }
 
