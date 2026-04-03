@@ -7,6 +7,7 @@ const fs             = require('fs');
 const path           = require('path');
 
 const FFMPEG       = process.env.FFMPEG_PATH || 'ffmpeg';
+const YT_DLP       = process.env.YT_DLP_PATH || 'yt-dlp';
 const COOKIES_FILE = path.join('/tmp', 'yt-cookies.txt');
 
 let yt = null; // Innertube client (search / info only)
@@ -96,12 +97,77 @@ async function getVideoInfo(url) {
 }
 
 /**
- * Create an audio stream for a YouTube URL via play-dl.
+ * yt-dlp → ffmpeg → PCM. Use when play-dl fails (common on datacenter IPs: "Invalid URL").
+ * @param {string} url
+ */
+function createAudioStreamYtDlp(url) {
+  const ytdlpArgs = [
+    '-f', 'bestaudio/best',
+    '-o', '-',
+    '--no-playlist',
+    '--no-warnings',
+  ];
+  if (fs.existsSync(COOKIES_FILE)) {
+    ytdlpArgs.push('--cookies', COOKIES_FILE);
+  }
+  ytdlpArgs.push(url);
+
+  console.log('[YouTube] Streaming via yt-dlp + ffmpeg');
+
+  const ytdlp = spawn(YT_DLP, ytdlpArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  ytdlp.stderr.on('data', d => {
+    const msg = d.toString().trim();
+    if (msg && !msg.includes('[download]')) console.error(`[yt-dlp] ${msg}`);
+  });
+  ytdlp.on('error', err => console.error('[yt-dlp] spawn error:', err.message));
+
+  const ffmpeg = spawn(FFMPEG, [
+    '-i',  'pipe:0',
+    '-vn',
+    '-f',  's16le',
+    '-ar', '48000',
+    '-ac', '2',
+    'pipe:1',
+  ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+  ytdlp.stdout.pipe(ffmpeg.stdin);
+  ytdlp.stdout.on('error', () => { try { ffmpeg.kill('SIGKILL'); } catch {} });
+
+  ffmpeg.stderr.on('data', d => {
+    const msg = d.toString().trim();
+    if (msg && !msg.startsWith('frame=') && !msg.startsWith('size=')) {
+      console.error(`[ffmpeg] ${msg}`);
+    }
+  });
+
+  return {
+    stream: ffmpeg.stdout,
+    type:   StreamType.Raw,
+    kill:   () => {
+      try { ytdlp.kill('SIGKILL'); } catch {}
+      try { ffmpeg.kill('SIGKILL'); } catch {}
+    },
+  };
+}
+
+/**
+ * Create an audio stream for a YouTube URL via play-dl, with yt-dlp fallback.
  * Returns { stream, type, kill }.
  * @param {string} url
  */
 async function createAudioStream(url) {
-  // Use video_info to get title for logging, then stream directly
+  try {
+    return await createAudioStreamPlayDl(url);
+  } catch (e) {
+    console.error('[YouTube] play-dl failed:', e.message);
+    return createAudioStreamYtDlp(url);
+  }
+}
+
+/**
+ * @param {string} url
+ */
+async function createAudioStreamPlayDl(url) {
   let title = url;
   try {
     const info = await playdl.video_info(url);
@@ -113,7 +179,6 @@ async function createAudioStream(url) {
   const pdStream = await playdl.stream(url, { quality: 2 });
   console.log(`[YouTube] Stream type: ${pdStream.type}`);
 
-  // OggOpus / WebmOpus — Discord can decode natively, no FFmpeg needed
   if (pdStream.type === 'ogg/opus') {
     return {
       stream: pdStream.stream,
@@ -130,7 +195,6 @@ async function createAudioStream(url) {
     };
   }
 
-  // Fallback: pipe arbitrary stream through FFmpeg → PCM
   const ffmpeg = spawn(FFMPEG, [
     '-i',  'pipe:0',
     '-vn',
