@@ -220,10 +220,41 @@ class MusicPlayer {
     if (!lastTrack) { this._startInactivityTimer(); return; }
 
     try {
-      const query   = `${lastTrack.title} ${lastTrack.uploader}`;
-      const results = await YouTube.search(query, 10);
-      const queued  = new Set(this.queue.map(t => t.url));
-      const pick    = results.filter(r => !queued.has(r.url));
+      // Extract artist from "Artist - Title" format, or clean uploader name
+      const artist = lastTrack.title.includes(' - ')
+        ? lastTrack.title.slice(0, lastTrack.title.indexOf(' - ')).trim()
+        : lastTrack.uploader.replace(/\s*-\s*Topic$/i, '').trim();
+
+      // Extract core title keywords (strip artist prefix and parentheticals)
+      const titleCore = lastTrack.title
+        .replace(/^[^-]+-\s*/, '')                   // remove "Artist - " prefix
+        .replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '')      // remove (stuff) [stuff]
+        .trim();
+
+      // Rotate search strategy for variety:
+      // 0 → same artist (familiar), 1 → title keywords (cross-artist discovery)
+      const strategy = Math.floor(Math.random() * 2);
+      const query = strategy === 0 ? artist : (titleCore.length > 3 ? titleCore : artist);
+
+      const results = await YouTube.search(query, 20);
+
+      const queued = new Set(this.queue.map(t => t.url));
+
+      // Strip parentheticals/brackets and lowercase for title comparison
+      const normalize = t => t.toLowerCase().replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '').trim();
+
+      // Exclude alternate versions of the same song
+      const VERSION_RE = /\b(sped[\s-]up|slowed|reverb|nightcore|visualizer|lyrics?\s*video|official\s+lyric|official\s+audio|karaoke|instrumental|remix|cover|acoustic|live\s+at|extended|lofi|lo-fi|breakbeat|mashup|reaction)\b/i;
+
+      const queuedNorm = this.queue.map(t => normalize(t.title));
+
+      const pick = results.filter(r => {
+        if (queued.has(r.url)) return false;
+        if (VERSION_RE.test(r.title)) return false;
+        const norm = normalize(r.title);
+        // Skip if too similar to a title already in the queue
+        return !queuedNorm.some(q => q === norm || q.includes(norm) || norm.includes(q));
+      });
 
       if (!pick.length) { this._startInactivityTimer(); return; }
 
