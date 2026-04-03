@@ -115,8 +115,8 @@ async function createAudioStream(url) {
 
       for (const f of audioFormats) {
         try {
-          // decipher() resolves the URL, applies n-challenge fix, requires session.player
-          const u = f.decipher(yt.session.player);
+          // decipher() is async — resolves the URL and applies n-challenge fix
+          const u = await f.decipher(yt.session.player);
           if (typeof u === 'string' && u.startsWith('http')) {
             streamUrl = u;
             console.log(`[YouTube] Got URL via ${client}: itag=${f.itag} ${f.mime_type} ${f.bitrate}bps`);
