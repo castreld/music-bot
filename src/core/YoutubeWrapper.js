@@ -101,10 +101,16 @@ async function getVideoInfo(url) {
  * @param {string} url
  */
 async function createAudioStream(url) {
-  const info = await playdl.video_info(url);
-  console.log(`[YouTube] Streaming: ${info.video_details.title}`);
+  // Use video_info to get title for logging, then stream directly
+  let title = url;
+  try {
+    const info = await playdl.video_info(url);
+    title = info.video_details.title ?? url;
+  } catch { /* non-fatal */ }
 
-  const pdStream = await playdl.stream_from_info(info, { quality: 2 });
+  console.log(`[YouTube] Streaming: ${title}`);
+
+  const pdStream = await playdl.stream(url, { quality: 2 });
   console.log(`[YouTube] Stream type: ${pdStream.type}`);
 
   // OggOpus / WebmOpus — Discord can decode natively, no FFmpeg needed
