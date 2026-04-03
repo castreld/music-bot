@@ -220,45 +220,63 @@ class MusicPlayer {
     if (!lastTrack) { this._startInactivityTimer(); return; }
 
     try {
-      // Extract artist from "Artist - Title" format, or clean uploader name
       const artist = lastTrack.title.includes(' - ')
         ? lastTrack.title.slice(0, lastTrack.title.indexOf(' - ')).trim()
         : lastTrack.uploader.replace(/\s*-\s*Topic$/i, '').trim();
 
-      // Extract core title keywords (strip artist prefix and parentheticals)
-      const titleCore = lastTrack.title
-        .replace(/^[^-]+-\s*/, '')                   // remove "Artist - " prefix
-        .replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '')      // remove (stuff) [stuff]
-        .trim();
-
-      // Rotate search strategy for variety:
-      // 0 → same artist (familiar), 1 → title keywords (cross-artist discovery)
-      const strategy = Math.floor(Math.random() * 2);
-      const query = strategy === 0 ? artist : (titleCore.length > 3 ? titleCore : artist);
-
-      const results = await YouTube.search(query, 20);
+      // Music-specific queries — never use raw title keywords (causes news/TV matches)
+      const queries = [
+        `${artist} best songs`,
+        `${artist} top songs`,
+        `${artist} popular`,
+        `songs like ${artist}`,
+      ];
+      const query = queries[Math.floor(Math.random() * queries.length)];
+      const results = await YouTube.search(query, 25);
 
       const queued = new Set(this.queue.map(t => t.url));
-
-      // Strip parentheticals/brackets and lowercase for title comparison
       const normalize = t => t.toLowerCase().replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '').trim();
-
-      // Exclude alternate versions of the same song
-      const VERSION_RE = /\b(sped[\s-]up|slowed|reverb|nightcore|visualizer|lyrics?\s*video|official\s+lyric|official\s+audio|karaoke|instrumental|remix|cover|acoustic|live\s+at|extended|lofi|lo-fi|breakbeat|mashup|reaction)\b/i;
-
       const queuedNorm = this.queue.map(t => normalize(t.title));
 
+      // Alternate versions of the same song
+      const VERSION_RE   = /\b(sped[\s-]up|slowed|reverb|nightcore|visualizer|lyric[s]?\s+video|official\s+lyric|official\s+audio|karaoke|instrumental|remix|cover|acoustic|live\s+at|extended|lofi|lo-fi|breakbeat|mashup)\b/i;
+      // Non-music content (the culprit for news/TV bleed-in)
+      const NON_MUSIC_RE = /\b(episode|ep\.\s*\d|interview|news|documentary|podcast|full\s+album|compilation|reaction|review|vlog|highlights|trailer|behind\s+the\s+scenes|weekly|report|press\s+conference|talk\s+show|hbo|vice|bbc\s+news)\b/i;
+
       const pick = results.filter(r => {
-        if (queued.has(r.url)) return false;
-        if (VERSION_RE.test(r.title)) return false;
+        if (queued.has(r.url))          return false;
+        if (VERSION_RE.test(r.title))   return false;
+        if (NON_MUSIC_RE.test(r.title)) return false;
+        // Discard anything over 10 minutes — compilations, TV shows, documentaries
+        if (r.duration > 600)           return false;
         const norm = normalize(r.title);
-        // Skip if too similar to a title already in the queue
-        return !queuedNorm.some(q => q === norm || q.includes(norm) || norm.includes(q));
+        return !queuedNorm.some(q => q === norm);
       });
 
       if (!pick.length) { this._startInactivityTimer(); return; }
 
-      const related = pick[Math.floor(Math.random() * pick.length)];
+      // Score like Spotify smart shuffle:
+      // - Earlier search results = more popular/relevant (YouTube ranks by relevance)
+      // - Boost verified music channels (VEVO, Topic)
+      // - Penalise MVs and live content (likely have intros)
+      const score = (r, idx) => {
+        let s = 100 - idx * 3;
+        const t = r.title.toLowerCase();
+        const u = r.uploader.toLowerCase();
+        if (u.includes('vevo'))                                   s += 12;
+        if (u.endsWith('- topic') || u.endsWith(' topic'))        s += 10;
+        if (/\b(official\s+)?(music\s+)?video\b|\bmv\b/.test(t)) s -=  4;
+        if (/\b(concert|live)\b/.test(t))                         s -=  8;
+        return s;
+      };
+
+      // Sort by score, then pick randomly from top 5 for variety
+      const top = pick
+        .map((r, idx) => ({ r, s: score(r, idx) }))
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 5);
+
+      const related = top[Math.floor(Math.random() * top.length)].r;
       const track   = { ...related, requestedBy: 'Autoplay' };
 
       this.queue.push(track);
