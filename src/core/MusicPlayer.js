@@ -8,55 +8,11 @@ const {
   VoiceConnectionStatus,
   entersState,
   NoSubscriberBehavior,
-  StreamType,
 } = require('@discordjs/voice');
 const YouTube = require('./YoutubeWrapper');
-const YtDlp   = require('./YtDlpWrapper'); // ✅ fix: actually import it
 const { nowPlayingEmbed, errorEmbed } = require('../utils/embeds');
-const { spawn } = require('child_process');
 
-const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
-
-/**
- * Wrap YtDlpWrapper.createAudioStream() into the { stream, type, kill }
- * shape that MusicPlayer.play() expects.
- */
-function createYtDlpAudioResource(url) {
-  const ytDlpProc = YtDlp.createAudioStream(url);
-
-  ytDlpProc.stderr.on('data', d => {
-    const msg = d.toString().trim();
-    if (msg) console.error(`[yt-dlp] ${msg}`);
-  });
-
-  const ffmpeg = spawn(FFMPEG, [
-    '-i', 'pipe:0',
-    '-vn',
-    '-f',  's16le',
-    '-ar', '48000',
-    '-ac', '2',
-    'pipe:1',
-  ], { stdio: ['pipe', 'pipe', 'pipe'] });
-
-  ytDlpProc.stdout.pipe(ffmpeg.stdin);
-
-  ffmpeg.stderr.on('data', d => {
-    const msg = d.toString().trim();
-    if (msg && !msg.startsWith('frame=') && !msg.startsWith('size=')) {
-      console.error(`[ffmpeg/ytdlp] ${msg}`);
-    }
-  });
-
-  return {
-    stream: ffmpeg.stdout,
-    type:   StreamType.Raw,
-    kill:   () => {
-      try { ytDlpProc.kill('SIGKILL'); } catch {}
-      try { ffmpeg.kill('SIGKILL'); }    catch {}
-    },
-  };
-}
 
 class MusicPlayer {
   constructor(guildId) {
@@ -134,28 +90,12 @@ class MusicPlayer {
 
     this._killCurrentProcess();
 
-    let audioResource = null;
-
-    // ✅ Try yt-dlp first (more reliable), fall back to Innertube
     try {
-      audioResource = createYtDlpAudioResource(track.url);
-      console.log(`[MusicPlayer] Using yt-dlp for: ${track.title}`);
-    } catch (ytDlpErr) {
-      console.error(`[MusicPlayer] yt-dlp failed, trying Innertube: ${ytDlpErr.message}`);
-      try {
-        audioResource = await YouTube.createAudioStream(track.url);
-      } catch (ytErr) {
-        console.error(`[MusicPlayer] Innertube also failed: ${ytErr.message}`);
-        this._onTrackEnd(true);
-        return;
-      }
-    }
+      const { stream, type, kill } = await YouTube.createAudioStream(track.url);
+      this._currentProcess = { kill };
 
-    try {
-      this._currentProcess = { kill: audioResource.kill };
-
-      const resource = createAudioResource(audioResource.stream, {
-        inputType:    audioResource.type,
+      const resource = createAudioResource(stream, {
+        inputType:    type,
         inlineVolume: true,
         metadata:     { track },
       });
@@ -281,7 +221,7 @@ class MusicPlayer {
 
     try {
       const query   = `${lastTrack.title} ${lastTrack.uploader}`;
-      const results = await YtDlp.search(query, 10); // ✅ fix: was undefined before
+      const results = await YouTube.search(query, 10);
       const queued  = new Set(this.queue.map(t => t.url));
       const pick    = results.filter(r => !queued.has(r.url));
 
