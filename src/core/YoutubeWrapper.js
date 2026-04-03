@@ -99,7 +99,23 @@ async function createAudioStream(url) {
   const validated = await play.validate(url);
   console.log(`[YouTube] stream url="${url}" validate="${validated}"`);
   if (validated !== 'yt_video') throw new Error(`Invalid URL (type: ${validated}) — ${url}`);
-  return play.stream(url, { quality: 2 });
+
+  // Test video_info first to see if auth/cookies work
+  try {
+    const info = await play.video_info(url);
+    console.log(`[YouTube] video_info OK: "${info.video_details.title}", formats: ${info.format?.length ?? 0}`);
+  } catch (err) {
+    console.error(`[YouTube] video_info failed: ${err.message}`);
+    throw err;
+  }
+
+  try {
+    return await play.stream(url);
+  } catch (err) {
+    console.error(`[YouTube] play.stream failed: ${err.message}`);
+    console.error(err.stack);
+    throw err;
+  }
 }
 
 module.exports = { init, search, getVideoInfo, createAudioStream };
