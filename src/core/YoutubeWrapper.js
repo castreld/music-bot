@@ -130,6 +130,7 @@ function createAudioStreamYtDlp(url) {
     'pipe:1',
   ], { stdio: ['pipe', 'pipe', 'pipe'] });
 
+  ffmpeg.stdin.on('error', () => {});
   ytdlp.stdout.pipe(ffmpeg.stdin);
   ytdlp.stdout.on('error', () => { try { ffmpeg.kill('SIGKILL'); } catch {} });
 
@@ -144,8 +145,10 @@ function createAudioStreamYtDlp(url) {
     stream: ffmpeg.stdout,
     type:   StreamType.Raw,
     kill:   () => {
-      try { ytdlp.kill('SIGKILL'); } catch {}
-      try { ffmpeg.kill('SIGKILL'); } catch {}
+      try { ytdlp.stdout.unpipe(ffmpeg.stdin); } catch {}
+      try { ytdlp.stdout.destroy(); }           catch {}
+      try { ytdlp.kill('SIGKILL'); }            catch {}
+      try { ffmpeg.kill('SIGKILL'); }           catch {}
     },
   };
 }
@@ -204,6 +207,7 @@ async function createAudioStreamPlayDl(url) {
     'pipe:1',
   ], { stdio: ['pipe', 'pipe', 'pipe'] });
 
+  ffmpeg.stdin.on('error', () => {});
   pdStream.stream.pipe(ffmpeg.stdin);
   pdStream.stream.on('error', () => { try { ffmpeg.kill('SIGKILL'); } catch {} });
 
@@ -218,8 +222,9 @@ async function createAudioStreamPlayDl(url) {
     stream: ffmpeg.stdout,
     type:   StreamType.Raw,
     kill:   () => {
-      try { pdStream.stream.destroy(); } catch {}
-      try { ffmpeg.kill('SIGKILL'); }    catch {}
+      try { pdStream.stream.unpipe(ffmpeg.stdin); } catch {}
+      try { pdStream.stream.destroy(); }            catch {}
+      try { ffmpeg.kill('SIGKILL'); }               catch {}
     },
   };
 }
