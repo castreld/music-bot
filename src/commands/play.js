@@ -16,11 +16,16 @@ module.exports = {
         .setRequired(true)),
 
   async execute(interaction) {
+    console.log(`[play] received from ${interaction.user.tag}, guild=${interaction.guildId}`);
+
+    await interaction.deferReply();
+
     const voiceChannel = getUserVoiceChannel(interaction);
-    if (!voiceChannel) return;
+    if (!voiceChannel) {
+      return interaction.editReply({ content: '❌ You need to be in a voice channel first.' });
+    }
 
     const query = interaction.options.getString('query', true);
-    await interaction.deferReply();
 
     let track;
     try {
