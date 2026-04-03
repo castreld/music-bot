@@ -1,7 +1,6 @@
 'use strict';
 
 const { spawn }    = require('child_process');
-const { Readable } = require('stream');
 const { StreamType } = require('@discordjs/voice');
 const fs   = require('fs');
 const path = require('path');
@@ -102,30 +101,32 @@ async function createAudioStream(url) {
 
   for (const client of clients) {
     try {
-      const info     = await yt.getBasicInfo(id, client);
+      // getInfo() initialises the JS player required for URL deciphering
+      const info     = await yt.getInfo(id, client);
       title          = info.basic_info?.title ?? url;
       const adaptive = info.streaming_data?.adaptive_formats ?? [];
 
       console.log(`[YouTube] Client=${client} formats=${adaptive.length}`);
-      for (const f of adaptive) {
-        if (!f.mime_type?.startsWith('audio/')) continue;
-        // Log each audio format's raw fields (no getter trigger)
-        const hasUrl    = Object.prototype.hasOwnProperty.call(f, 'url') && !!f['url'];
-        const hasCipher = !!(f.signature_cipher ?? f.cipher);
-        console.log(`  itag=${f.itag} mime=${f.mime_type} bitrate=${f.bitrate} hasUrl=${hasUrl} hasCipher=${hasCipher}`);
-      }
 
-      // Find an audio format that already has a plain URL property
-      const pick = adaptive
+      // Sort audio formats by bitrate (highest first), try each until one resolves
+      const audioFormats = adaptive
         .filter(f => f.mime_type?.startsWith('audio/'))
-        .filter(f => Object.prototype.hasOwnProperty.call(f, 'url') && typeof f['url'] === 'string' && f['url'].startsWith('http'))
-        .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))[0];
+        .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
 
-      if (pick) {
-        streamUrl = pick['url'];
-        console.log(`[YouTube] Got URL via ${client}: ${pick.mime_type} ${pick.bitrate}bps`);
-        break;
+      for (const f of audioFormats) {
+        try {
+          const u = f.url; // getter — deciphers internally if needed
+          if (typeof u === 'string' && u.startsWith('http')) {
+            streamUrl = u;
+            console.log(`[YouTube] Got URL via ${client}: itag=${f.itag} ${f.mime_type} ${f.bitrate}bps`);
+            break;
+          }
+        } catch (urlErr) {
+          console.error(`[YouTube] itag=${f.itag} url error: ${urlErr.message}`);
+        }
       }
+
+      if (streamUrl) break;
     } catch (e) {
       console.error(`[YouTube] Client ${client} error: ${e.message}`);
     }
