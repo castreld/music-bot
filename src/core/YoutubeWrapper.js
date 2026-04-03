@@ -231,9 +231,7 @@ async function createAudioStreamPlayDl(url) {
 
 /**
  * Search and return the best result for a query.
- * Trusts YouTube's #1 result (most relevant) but skips obvious live/concert videos
- * since those have audience noise or stage intros before the song starts.
- * Falls back to the #1 result if no better option is found.
+ * Trusts YouTube's #1 result (most relevant) but skips obvious live/concert videos.
  * @param {string} query
  * @returns {Promise<Track>}
  */
@@ -246,9 +244,50 @@ async function findBestTrack(query) {
   return results.find(r => !LIVE_RE.test(r.title)) ?? results[0];
 }
 
+/**
+ * Parse a YouTube short view count string ("1.2M views", "430K", etc.) into a number.
+ * @param {string} text
+ * @returns {number}
+ */
+function parseViewCount(text) {
+  if (!text) return 0;
+  const clean = String(text).replace(/[^0-9.KMBkmb]/g, '');
+  const n = parseFloat(clean);
+  if (isNaN(n)) return 0;
+  if (/k/i.test(text)) return Math.round(n * 1_000);
+  if (/m/i.test(text)) return Math.round(n * 1_000_000);
+  if (/b/i.test(text)) return Math.round(n * 1_000_000_000);
+  return Math.round(n);
+}
+
+/**
+ * Fetch YouTube's related video list for a given URL using Innertube's watch_next_feed.
+ * These are the same "Up Next" videos YouTube shows beside the player — already ranked
+ * by collaborative filtering, so far more relevant than raw text searches.
+ * @param {string} url
+ * @returns {Promise<Track[]>}
+ */
+async function getRelatedVideos(url) {
+  const id   = extractId(url);
+  const info = await yt.getInfo(id);                  // full page, includes watch_next_feed
+  const feed = info.watch_next_feed ?? [];
+
+  return feed
+    .filter(item => item.type === 'CompactVideo' && item.id)
+    .slice(0, 15)
+    .map(item => ({
+      title:     item.title?.text                              || 'Unknown',
+      url:       `https://www.youtube.com/watch?v=${item.id}`,
+      duration:  item.duration?.seconds                        ?? 0,
+      thumbnail: item.thumbnails?.[0]?.url                     ?? null,
+      uploader:  item.author?.name                             || 'Unknown',
+      viewCount: parseViewCount(item.short_view_count?.text ?? item.view_count?.text ?? '0'),
+    }));
+}
+
 function extractId(url) {
   const m = url.match(/[?&]v=([^&]+)/) || url.match(/youtu\.be\/([^?]+)/);
   return m ? m[1] : url;
 }
 
-module.exports = { init, search, findBestTrack, getVideoInfo, createAudioStream };
+module.exports = { init, search, findBestTrack, getVideoInfo, getRelatedVideos, createAudioStream };

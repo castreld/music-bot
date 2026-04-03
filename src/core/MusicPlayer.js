@@ -220,61 +220,72 @@ class MusicPlayer {
     if (!lastTrack) { this._startInactivityTimer(); return; }
 
     try {
-      const artist = lastTrack.title.includes(' - ')
-        ? lastTrack.title.slice(0, lastTrack.title.indexOf(' - ')).trim()
-        : lastTrack.uploader.replace(/\s*-\s*Topic$/i, '').trim();
+      // ── Step 1: Candidate Pool ───────────────────────────────────────────────
+      // Use YouTube's own "Up Next" list (collaborative filtering already applied).
+      // This is far more accurate than any text-search heuristic.
+      const candidates = await YouTube.getRelatedVideos(lastTrack.url);
 
-      // Music-specific queries — never use raw title keywords (causes news/TV matches)
-      const queries = [
-        `${artist} best songs`,
-        `${artist} top songs`,
-        `${artist} popular`,
-        `songs like ${artist}`,
+      // ── Step 2: Strict Filter ────────────────────────────────────────────────
+      const VERSION_TAGS = [
+        'live', 'cover', 'acoustic', 'reggae', 'remix', 'karaoke',
+        'instrumental', 'sped.?up', 'slowed', '8d', 'lofi', 'lo-fi',
+        'nightcore', 'reverb', 'visualizer', 'mashup',
       ];
-      const query = queries[Math.floor(Math.random() * queries.length)];
-      const results = await YouTube.search(query, 25);
 
-      const queued = new Set(this.queue.map(t => t.url));
-      const normalize = t => t.toLowerCase().replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '').trim();
-      const queuedNorm = this.queue.map(t => normalize(t.title));
+      // If the seed song itself contains a tag, allow that tag in candidates
+      // (e.g. user played an acoustic version → autoplay can queue another acoustic)
+      const seedTagsAllowed = new Set(
+        VERSION_TAGS.filter(tag => new RegExp(`\\b${tag}\\b`, 'i').test(lastTrack.title))
+      );
+      const blockedTags = VERSION_TAGS.filter(t => !seedTagsAllowed.has(t));
+      const VERSION_RE  = new RegExp(`\\b(${blockedTags.join('|')})\\b`, 'i');
 
-      // Alternate versions of the same song
-      const VERSION_RE   = /\b(sped[\s-]up|slowed|reverb|nightcore|visualizer|lyric[s]?\s+video|official\s+lyric|official\s+audio|karaoke|instrumental|remix|cover|acoustic|live\s+at|extended|lofi|lo-fi|breakbeat|mashup)\b/i;
-      // Non-music content (the culprit for news/TV bleed-in)
-      const NON_MUSIC_RE = /\b(episode|ep\.\s*\d|interview|news|documentary|podcast|full\s+album|compilation|reaction|review|vlog|highlights|trailer|behind\s+the\s+scenes|weekly|report|press\s+conference|talk\s+show|hbo|vice|bbc\s+news)\b/i;
+      const NON_MUSIC_RE = /\b(episode|ep\.\s*\d|interview|news|documentary|podcast|full\s+album|compilation|reaction|review|vlog|highlights|trailer|behind\s+the\s+scenes|report|talk\s+show)\b/i;
 
-      const pick = results.filter(r => {
-        if (queued.has(r.url))          return false;
-        if (VERSION_RE.test(r.title))   return false;
-        if (NON_MUSIC_RE.test(r.title)) return false;
-        // Discard anything over 10 minutes — compilations, TV shows, documentaries
-        if (r.duration > 600)           return false;
-        const norm = normalize(r.title);
-        return !queuedNorm.some(q => q === norm);
+      // Duration gate: within ±2 min of seed, AND must be between 1:30 – 8:00
+      const seedDur  = lastTrack.duration || 210;
+      const MIN_DUR  = Math.max(90,  seedDur - 120);
+      const MAX_DUR  = Math.min(480, seedDur + 120);
+
+      const history = new Set(this.queue.map(t => t.url));
+
+      const filtered = candidates.filter(r => {
+        if (history.has(r.url))           return false; // already queued / played
+        if (VERSION_RE.test(r.title))     return false; // blocked version type
+        if (NON_MUSIC_RE.test(r.title))   return false; // non-music content
+        if (r.duration < MIN_DUR || r.duration > MAX_DUR) return false; // wrong length
+        if (r.viewCount > 0 && r.viewCount < 100_000)     return false; // too obscure
+        return true;
       });
 
-      if (!pick.length) { this._startInactivityTimer(); return; }
+      if (!filtered.length) { this._startInactivityTimer(); return; }
 
-      // Score like Spotify smart shuffle:
-      // - Earlier search results = more popular/relevant (YouTube ranks by relevance)
-      // - Boost verified music channels (VEVO, Topic)
-      // - Penalise MVs and live content (likely have intros)
-      const score = (r, idx) => {
-        let s = 100 - idx * 3;
-        const t = r.title.toLowerCase();
-        const u = r.uploader.toLowerCase();
-        if (u.includes('vevo'))                                   s += 12;
-        if (u.endsWith('- topic') || u.endsWith(' topic'))        s += 10;
-        if (/\b(official\s+)?(music\s+)?video\b|\bmv\b/.test(t)) s -=  4;
-        if (/\b(concert|live)\b/.test(t))                         s -=  8;
+      // ── Step 3: Score & Select ───────────────────────────────────────────────
+      const seedArtist = lastTrack.uploader.replace(/\s*-\s*Topic$/i, '').trim().toLowerCase();
+
+      const score = r => {
+        let s = 0;
+        const u = r.uploader;
+        const ul = u.toLowerCase();
+        const tl = r.title.toLowerCase();
+
+        // Official channel bonus
+        if (/vevo$/i.test(u) || /official/i.test(u))              s += 30;
+        // Same artist bonus
+        if (ul.replace(/\s*-\s*topic$/i, '').trim() === seedArtist) s += 20;
+        // Prefer clean audio/lyric uploads (no intros)
+        if (/\b(lyric[s]?|official\s+audio)\b/i.test(tl))         s += 10;
+        // Slight penalty for MVs (may have story intro)
+        if (/\b(official\s+)?(music\s+)?video\b|\bmv\b/i.test(tl)) s -=  5;
+
         return s;
       };
 
-      // Sort by score, then pick randomly from top 5 for variety
-      const top = pick
-        .map((r, idx) => ({ r, s: score(r, idx) }))
+      // Pick randomly from top 3 to stay varied without sacrificing quality
+      const top = filtered
+        .map(r => ({ r, s: score(r) }))
         .sort((a, b) => b.s - a.s)
-        .slice(0, 5);
+        .slice(0, 3);
 
       const related = top[Math.floor(Math.random() * top.length)].r;
       const track   = { ...related, requestedBy: 'Autoplay' };
