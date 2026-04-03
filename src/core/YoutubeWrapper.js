@@ -115,14 +115,17 @@ async function createAudioStream(url) {
 
       for (const f of audioFormats) {
         try {
-          const u = f.url; // getter — deciphers internally if needed
+          // decipher() resolves the URL, applies n-challenge fix, requires session.player
+          const u = f.decipher(yt.session.player);
           if (typeof u === 'string' && u.startsWith('http')) {
             streamUrl = u;
             console.log(`[YouTube] Got URL via ${client}: itag=${f.itag} ${f.mime_type} ${f.bitrate}bps`);
             break;
+          } else {
+            console.error(`[YouTube] itag=${f.itag} decipher returned non-URL: ${u}`);
           }
         } catch (urlErr) {
-          console.error(`[YouTube] itag=${f.itag} url error: ${urlErr.message}`);
+          console.error(`[YouTube] itag=${f.itag} decipher error: ${urlErr.message}`);
         }
       }
 
