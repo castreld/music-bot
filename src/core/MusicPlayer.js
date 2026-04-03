@@ -7,10 +7,8 @@ const {
   AudioPlayerStatus,
   VoiceConnectionStatus,
   entersState,
-  StreamType,
   NoSubscriberBehavior,
 } = require('@discordjs/voice');
-const { EmbedBuilder } = require('discord.js');
 const YouTube = require('./YoutubeWrapper');
 const { nowPlayingEmbed, errorEmbed } = require('../utils/embeds');
 
@@ -125,8 +123,8 @@ class MusicPlayer {
     this._killCurrentProcess();
 
     try {
-      const { stream, type } = await YouTube.createAudioStream(track.url);
-      this._currentProcess = { kill: () => { try { stream.destroy(); } catch {} } };
+      const { stream, type, kill } = await YouTube.createAudioStream(track.url);
+      this._currentProcess = { kill };
 
       const resource = createAudioResource(stream, {
         inputType:    type,

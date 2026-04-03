@@ -1,75 +1,70 @@
 'use strict';
 
-const play = require('play-dl');
+const { spawn }  = require('child_process');
+const { StreamType } = require('@discordjs/voice');
 const fs   = require('fs');
 const path = require('path');
 
+const FFMPEG       = process.env.FFMPEG_PATH || 'ffmpeg';
 const COOKIES_FILE = path.join('/tmp', 'yt-cookies.txt');
 
+let yt = null; // Innertube client
+
 /**
- * Parse a Netscape-format cookies.txt into a cookie header string for play-dl.
- * @param {string} filePath
- * @returns {string}
+ * Parse Netscape cookies.txt into a Cookie header string.
  */
 function parseCookieFile(filePath) {
   return fs
     .readFileSync(filePath, 'utf8')
     .split('\n')
-    .filter(l => !l.startsWith('#') && l.trim().length > 0)
+    .filter(l => !l.startsWith('#') && l.includes('\t'))
     .map(l => {
       const parts = l.split('\t');
-      if (parts.length >= 7) return `${parts[5]}=${parts[6].trim()}`;
-      return null;
+      return parts.length >= 7 ? `${parts[5]}=${parts[6].trim()}` : null;
     })
     .filter(Boolean)
     .join('; ');
 }
 
 /**
- * Initialize play-dl auth from the YOUTUBE_COOKIES env var.
- * Call once at startup.
+ * Initialize Innertube client. Call once at startup.
  */
 async function init() {
-  // Write cookies file from env var
   if (process.env.YOUTUBE_COOKIES) {
     try {
       fs.writeFileSync(COOKIES_FILE, process.env.YOUTUBE_COOKIES, 'utf8');
       console.log('[YouTube] Cookies file written.');
     } catch (e) {
-      console.error('[YouTube] Failed to write cookies file:', e.message);
+      console.error('[YouTube] Failed to write cookies:', e.message);
     }
   }
 
-  // Set play-dl token from cookies
+  // youtubei.js is ESM — use dynamic import
+  const { Innertube } = await import('youtubei.js');
+
+  const opts = {};
   if (fs.existsSync(COOKIES_FILE)) {
-    try {
-      const cookie = parseCookieFile(COOKIES_FILE);
-      await play.setToken({ youtube: { cookie } });
-      console.log('[YouTube] Cookie token set for play-dl.');
-    } catch (e) {
-      console.error('[YouTube] Failed to set play-dl cookie token:', e.message);
-    }
+    opts.cookie = parseCookieFile(COOKIES_FILE);
   }
+
+  yt = await Innertube.create(opts);
+  console.log('[YouTube] Innertube client ready.');
 }
 
 /**
- * Search YouTube and return up to `limit` results.
+ * Search YouTube for videos.
  * @param {string} query
  * @param {number} limit
  * @returns {Promise<Track[]>}
  */
 async function search(query, limit = 5) {
-  const results = await play.search(query, {
-    source: { youtube: 'video' },
-    limit,
-  });
-
-  return results.map(v => ({
-    title:     v.title    || 'Unknown Title',
-    url:       v.url,
-    duration:  v.durationInSec || 0,
+  const results = await yt.search(query, { type: 'video' });
+  return (results.videos || []).slice(0, limit).map(v => ({
+    title:     v.title?.text      || 'Unknown Title',
+    url:       `https://www.youtube.com/watch?v=${v.id}`,
+    duration:  v.duration?.seconds ?? 0,
     thumbnail: v.thumbnails?.[0]?.url || null,
-    uploader:  v.channel?.name || 'Unknown',
+    uploader:  v.author?.name    || 'Unknown',
   }));
 }
 
@@ -79,43 +74,65 @@ async function search(query, limit = 5) {
  * @returns {Promise<Track>}
  */
 async function getVideoInfo(url) {
-  const info = await play.video_info(url);
-  const v    = info.video_details;
+  const id   = extractId(url);
+  const info = await yt.getBasicInfo(id);
+  const v    = info.basic_info;
   return {
-    title:     v.title    || 'Unknown Title',
-    url:       v.url,
-    duration:  v.durationInSec || 0,
-    thumbnail: v.thumbnails?.[0]?.url || null,
-    uploader:  v.channel?.name || 'Unknown',
+    title:     v.title          || 'Unknown Title',
+    url:       `https://www.youtube.com/watch?v=${v.id}`,
+    duration:  v.duration       || 0,
+    thumbnail: v.thumbnail?.[0]?.url || null,
+    uploader:  v.channel?.name  || 'Unknown',
   };
 }
 
 /**
- * Create an audio stream for a YouTube URL.
- * Returns { stream, type } for createAudioResource.
+ * Create a PCM audio stream for a YouTube URL via Innertube + FFmpeg.
+ * Returns { stream, type, kill }.
  * @param {string} url
  */
 async function createAudioStream(url) {
-  const validated = await play.validate(url);
-  console.log(`[YouTube] stream url="${url}" validate="${validated}"`);
-  if (validated !== 'yt_video') throw new Error(`Invalid URL (type: ${validated}) — ${url}`);
+  const id   = extractId(url);
+  const info = await yt.getBasicInfo(id);
 
-  // Test video_info first to see if auth/cookies work
-  try {
-    const info = await play.video_info(url);
-    console.log(`[YouTube] video_info OK: "${info.video_details.title}", formats: ${info.format?.length ?? 0}`);
-  } catch (err) {
-    console.error(`[YouTube] video_info failed: ${err.message}`);
-    throw err;
-  }
+  // Pick best audio-only format
+  const format = info.chooseFormat({ type: 'audio', quality: 'best' });
+  if (!format) throw new Error('No audio format available');
 
-  try {
-    return await play.stream(url);
-  } catch (err) {
-    console.error(`[YouTube] play.stream failed: ${err.message}`);
-    console.error(err.stack);
-    throw err;
-  }
+  // Decipher solves the n-challenge using YouTube's own JS
+  const streamUrl = format.decipher(yt.session.player);
+  console.log(`[YouTube] Streaming: ${info.basic_info.title}`);
+
+  const ffmpeg = spawn(FFMPEG, [
+    '-reconnect',          '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max','5',
+    '-i',                  streamUrl,
+    '-vn',
+    '-f',                  's16le',
+    '-ar',                 '48000',
+    '-ac',                 '2',
+    'pipe:1',
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  ffmpeg.stderr.on('data', d => {
+    const msg = d.toString().trim();
+    // Only log actual errors, not the normal progress lines
+    if (msg && !msg.startsWith('frame=') && !msg.startsWith('size=') && !msg.startsWith('  ') && !msg.startsWith('lib')) {
+      console.error(`[ffmpeg] ${msg}`);
+    }
+  });
+
+  return {
+    stream: ffmpeg.stdout,
+    type:   StreamType.Raw,
+    kill:   () => { try { ffmpeg.kill('SIGKILL'); } catch {} },
+  };
+}
+
+function extractId(url) {
+  const m = url.match(/[?&]v=([^&]+)/) || url.match(/youtu\.be\/([^?]+)/);
+  return m ? m[1] : url;
 }
 
 module.exports = { init, search, getVideoInfo, createAudioStream };
