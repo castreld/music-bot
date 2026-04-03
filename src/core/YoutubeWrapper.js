@@ -96,6 +96,9 @@ async function getVideoInfo(url) {
  * @param {string} url
  */
 async function createAudioStream(url) {
+  const validated = await play.validate(url);
+  console.log(`[YouTube] stream url="${url}" validate="${validated}"`);
+  if (validated !== 'yt_video') throw new Error(`Invalid URL (type: ${validated}) — ${url}`);
   return play.stream(url, { quality: 2 });
 }
 
