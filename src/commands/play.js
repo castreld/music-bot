@@ -33,9 +33,9 @@ module.exports = {
         const info = await YtDlp.getVideoInfo(query);
         track = { ...info, requestedBy: interaction.user.tag };
       } else {
-        const results = await YtDlp.search(query, 1);
-        if (!results.length) return interaction.editReply({ embeds: [errorEmbed('No results found.')] });
-        track = { ...results[0], requestedBy: interaction.user.tag };
+        const result = await YtDlp.findBestTrack(query);
+        if (!result) return interaction.editReply({ embeds: [errorEmbed('No results found.')] });
+        track = { ...result, requestedBy: interaction.user.tag };
       }
     } catch (err) {
       console.error('[play]', err);

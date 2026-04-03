@@ -229,9 +229,40 @@ async function createAudioStreamPlayDl(url) {
   };
 }
 
+/**
+ * Search and return the single best audio-friendly result for a query.
+ * Prefers Topic channels, lyric/audio uploads; avoids MVs and live concerts.
+ * Falls back to the top result if nothing scores better.
+ * @param {string} query
+ * @returns {Promise<Track>}
+ */
+async function findBestTrack(query) {
+  const results = await search(query, 8);
+  if (!results.length) return null;
+
+  const score = r => {
+    let s = 0;
+    const t = r.title.toLowerCase();
+    const u = r.uploader.toLowerCase();
+
+    if (u.endsWith('- topic') || u.endsWith(' topic')) s += 4; // auto-generated audio channel
+    if (/\blyric(s)?\b/.test(t))                               s += 3; // lyric video
+    if (/\bofficial\s+audio\b/.test(t))                        s += 3; // official audio
+    if (/\baudio\b/.test(t))                                   s += 1;
+
+    if (/\b(official\s+)?(music\s+)?video\b|\bmv\b/.test(t))  s -= 2; // music video
+    if (/\blive(\s+at|\s+from|\s+performance)?\b/.test(t))    s -= 3; // live/concert
+    if (/\bconcert\b|\bperformance\b/.test(t))                 s -= 3;
+
+    return s;
+  };
+
+  return results.reduce((best, r) => score(r) > score(best) ? r : best, results[0]);
+}
+
 function extractId(url) {
   const m = url.match(/[?&]v=([^&]+)/) || url.match(/youtu\.be\/([^?]+)/);
   return m ? m[1] : url;
 }
 
-module.exports = { init, search, getVideoInfo, createAudioStream };
+module.exports = { init, search, findBestTrack, getVideoInfo, createAudioStream };
