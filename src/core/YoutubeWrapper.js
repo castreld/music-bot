@@ -93,27 +93,58 @@ async function getVideoInfo(url) {
  * @param {string} url
  */
 async function createAudioStream(url) {
-  const id   = extractId(url);
-  const info = await yt.getInfo(id);
-  console.log(`[YouTube] Streaming: ${info.basic_info.title}`);
+  const id = extractId(url);
 
-  // download() handles format selection and deciphering internally
-  const rawStream = await info.download({ type: 'audio', quality: 'best' });
+  // Try multiple clients — each may return different format types
+  const clients = ['IOS', 'ANDROID', 'WEB'];
+  let streamUrl = null;
+  let title     = url;
 
-  // youtubei.js returns a Web ReadableStream — convert to Node.js Readable
-  const ytStream = Readable.fromWeb(rawStream);
+  for (const client of clients) {
+    try {
+      const info     = await yt.getBasicInfo(id, client);
+      title          = info.basic_info?.title ?? url;
+      const adaptive = info.streaming_data?.adaptive_formats ?? [];
 
-  // Pipe through FFmpeg for PCM output
+      console.log(`[YouTube] Client=${client} formats=${adaptive.length}`);
+      for (const f of adaptive) {
+        if (!f.mime_type?.startsWith('audio/')) continue;
+        // Log each audio format's raw fields (no getter trigger)
+        const hasUrl    = Object.prototype.hasOwnProperty.call(f, 'url') && !!f['url'];
+        const hasCipher = !!(f.signature_cipher ?? f.cipher);
+        console.log(`  itag=${f.itag} mime=${f.mime_type} bitrate=${f.bitrate} hasUrl=${hasUrl} hasCipher=${hasCipher}`);
+      }
+
+      // Find an audio format that already has a plain URL property
+      const pick = adaptive
+        .filter(f => f.mime_type?.startsWith('audio/'))
+        .filter(f => Object.prototype.hasOwnProperty.call(f, 'url') && typeof f['url'] === 'string' && f['url'].startsWith('http'))
+        .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))[0];
+
+      if (pick) {
+        streamUrl = pick['url'];
+        console.log(`[YouTube] Got URL via ${client}: ${pick.mime_type} ${pick.bitrate}bps`);
+        break;
+      }
+    } catch (e) {
+      console.error(`[YouTube] Client ${client} error: ${e.message}`);
+    }
+  }
+
+  if (!streamUrl) throw new Error('No streamable audio URL found from any client');
+  console.log(`[YouTube] Streaming: ${title}`);
+
   const ffmpeg = spawn(FFMPEG, [
-    '-i',  'pipe:0',
+    '-reconnect',          '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max','5',
+    '-i',                  streamUrl,
     '-vn',
-    '-f',  's16le',
-    '-ar', '48000',
-    '-ac', '2',
+    '-f',                  's16le',
+    '-ar',                 '48000',
+    '-ac',                 '2',
     'pipe:1',
-  ], { stdio: ['pipe', 'pipe', 'pipe'] });
-
-  ytStream.pipe(ffmpeg.stdin);
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
   ffmpeg.stderr.on('data', d => {
     const msg = d.toString().trim();
@@ -125,10 +156,7 @@ async function createAudioStream(url) {
   return {
     stream: ffmpeg.stdout,
     type:   StreamType.Raw,
-    kill:   () => {
-      try { ytStream.destroy(); }   catch {}
-      try { ffmpeg.kill('SIGKILL'); } catch {}
-    },
+    kill:   () => { try { ffmpeg.kill('SIGKILL'); } catch {} },
   };
 }
 
