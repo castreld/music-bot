@@ -230,34 +230,20 @@ async function createAudioStreamPlayDl(url) {
 }
 
 /**
- * Search and return the single best audio-friendly result for a query.
- * Prefers Topic channels, lyric/audio uploads; avoids MVs and live concerts.
- * Falls back to the top result if nothing scores better.
+ * Search and return the best result for a query.
+ * Trusts YouTube's #1 result (most relevant) but skips obvious live/concert videos
+ * since those have audience noise or stage intros before the song starts.
+ * Falls back to the #1 result if no better option is found.
  * @param {string} query
  * @returns {Promise<Track>}
  */
 async function findBestTrack(query) {
-  const results = await search(query, 8);
+  const results = await search(query, 5);
   if (!results.length) return null;
 
-  const score = r => {
-    let s = 0;
-    const t = r.title.toLowerCase();
-    const u = r.uploader.toLowerCase();
+  const LIVE_RE = /\b(live\s+at|live\s+from|live\s+performance|concert|at\s+the\s+\w+\s+arena|tour\b)/i;
 
-    if (u.endsWith('- topic') || u.endsWith(' topic')) s += 4; // auto-generated audio channel
-    if (/\blyric(s)?\b/.test(t))                               s += 3; // lyric video
-    if (/\bofficial\s+audio\b/.test(t))                        s += 3; // official audio
-    if (/\baudio\b/.test(t))                                   s += 1;
-
-    if (/\b(official\s+)?(music\s+)?video\b|\bmv\b/.test(t))  s -= 2; // music video
-    if (/\blive(\s+at|\s+from|\s+performance)?\b/.test(t))    s -= 3; // live/concert
-    if (/\bconcert\b|\bperformance\b/.test(t))                 s -= 3;
-
-    return s;
-  };
-
-  return results.reduce((best, r) => score(r) > score(best) ? r : best, results[0]);
+  return results.find(r => !LIVE_RE.test(r.title)) ?? results[0];
 }
 
 function extractId(url) {
