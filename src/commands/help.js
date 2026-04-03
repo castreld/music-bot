@@ -34,7 +34,7 @@ module.exports = {
       .setColor(0x5865F2)
       .setTitle('Music Bot — Commands')
       .addFields(fields)
-      .setFooter({ text: 'Music powered by YouTube via yt-dlp' });
+      .setFooter({ text: 'Music powered by YouTube via play-dl' });
 
     await interaction.reply({ embeds: [embed], ephemeral: true });
   },
