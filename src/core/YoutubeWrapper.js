@@ -1,6 +1,7 @@
 'use strict';
 
-const { spawn }  = require('child_process');
+const { spawn }    = require('child_process');
+const { Readable } = require('stream');
 const { StreamType } = require('@discordjs/voice');
 const fs   = require('fs');
 const path = require('path');
@@ -93,32 +94,30 @@ async function getVideoInfo(url) {
  */
 async function createAudioStream(url) {
   const id   = extractId(url);
-  const info = await yt.getBasicInfo(id);
-
-  // Pick best audio-only format
-  const format = info.chooseFormat({ type: 'audio', quality: 'best' });
-  if (!format) throw new Error('No audio format available');
-
-  // Decipher solves the n-challenge using YouTube's own JS
-  const streamUrl = format.decipher(yt.session.player);
+  const info = await yt.getInfo(id);
   console.log(`[YouTube] Streaming: ${info.basic_info.title}`);
 
+  // download() handles format selection and deciphering internally
+  const rawStream = await info.download({ type: 'audio', quality: 'best' });
+
+  // youtubei.js returns a Web ReadableStream — convert to Node.js Readable
+  const ytStream = Readable.fromWeb(rawStream);
+
+  // Pipe through FFmpeg for PCM output
   const ffmpeg = spawn(FFMPEG, [
-    '-reconnect',          '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max','5',
-    '-i',                  streamUrl,
+    '-i',  'pipe:0',
     '-vn',
-    '-f',                  's16le',
-    '-ar',                 '48000',
-    '-ac',                 '2',
+    '-f',  's16le',
+    '-ar', '48000',
+    '-ac', '2',
     'pipe:1',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+  ytStream.pipe(ffmpeg.stdin);
 
   ffmpeg.stderr.on('data', d => {
     const msg = d.toString().trim();
-    // Only log actual errors, not the normal progress lines
-    if (msg && !msg.startsWith('frame=') && !msg.startsWith('size=') && !msg.startsWith('  ') && !msg.startsWith('lib')) {
+    if (msg && !msg.startsWith('frame=') && !msg.startsWith('size=')) {
       console.error(`[ffmpeg] ${msg}`);
     }
   });
@@ -126,7 +125,10 @@ async function createAudioStream(url) {
   return {
     stream: ffmpeg.stdout,
     type:   StreamType.Raw,
-    kill:   () => { try { ffmpeg.kill('SIGKILL'); } catch {} },
+    kill:   () => {
+      try { ytStream.destroy(); }   catch {}
+      try { ffmpeg.kill('SIGKILL'); } catch {}
+    },
   };
 }
 
