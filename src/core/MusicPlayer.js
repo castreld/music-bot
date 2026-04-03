@@ -8,32 +8,70 @@ const {
   VoiceConnectionStatus,
   entersState,
   NoSubscriberBehavior,
+  StreamType,
 } = require('@discordjs/voice');
 const YouTube = require('./YoutubeWrapper');
+const YtDlp   = require('./YtDlpWrapper'); // ✅ fix: actually import it
 const { nowPlayingEmbed, errorEmbed } = require('../utils/embeds');
+const { spawn } = require('child_process');
 
-const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Wrap YtDlpWrapper.createAudioStream() into the { stream, type, kill }
+ * shape that MusicPlayer.play() expects.
+ */
+function createYtDlpAudioResource(url) {
+  const ytDlpProc = YtDlp.createAudioStream(url);
+
+  ytDlpProc.stderr.on('data', d => {
+    const msg = d.toString().trim();
+    if (msg) console.error(`[yt-dlp] ${msg}`);
+  });
+
+  const ffmpeg = spawn(FFMPEG, [
+    '-i', 'pipe:0',
+    '-vn',
+    '-f',  's16le',
+    '-ar', '48000',
+    '-ac', '2',
+    'pipe:1',
+  ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+  ytDlpProc.stdout.pipe(ffmpeg.stdin);
+
+  ffmpeg.stderr.on('data', d => {
+    const msg = d.toString().trim();
+    if (msg && !msg.startsWith('frame=') && !msg.startsWith('size=')) {
+      console.error(`[ffmpeg/ytdlp] ${msg}`);
+    }
+  });
+
+  return {
+    stream: ffmpeg.stdout,
+    type:   StreamType.Raw,
+    kill:   () => {
+      try { ytDlpProc.kill('SIGKILL'); } catch {}
+      try { ffmpeg.kill('SIGKILL'); }    catch {}
+    },
+  };
+}
 
 class MusicPlayer {
-  /**
-   * @param {string} guildId
-   */
   constructor(guildId) {
-    this.guildId     = guildId;
-    this.queue       = [];      // Track[]
-    this.currentIndex = -1;    // 0-based; -1 = nothing playing
-    this.isPlaying   = false;
-    this.isPaused    = false;
-
-    // Timestamps for /nowplaying progress bar
-    this.startTimestamp = null; // epoch ms of effective playback start (adjusted for pauses)
-    this.pausedAt       = null; // epoch ms when paused
-
-    this.autoplay         = false; // autoplay toggle
+    this.guildId      = guildId;
+    this.queue        = [];
+    this.currentIndex = -1;
+    this.isPlaying    = false;
+    this.isPaused     = false;
+    this.startTimestamp = null;
+    this.pausedAt       = null;
+    this.autoplay         = false;
     this.voiceConnection  = null;
-    this._currentProcess  = null; // yt-dlp spawn handle
+    this._currentProcess  = null;
     this._inactivityTimer = null;
-    this._textChannel     = null; // for auto-advance announcements
+    this._textChannel     = null;
 
     this.audioPlayer = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
@@ -44,7 +82,7 @@ class MusicPlayer {
     });
 
     this.audioPlayer.on(AudioPlayerStatus.Idle, () => {
-      if (!this.isPlaying) return; // already cleaned up
+      if (!this.isPlaying) return;
       this._onTrackEnd();
     });
 
@@ -54,32 +92,21 @@ class MusicPlayer {
     });
   }
 
-  // ---------------------------------------------------------------------------
-  // Voice connection
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Join a voice channel (or reuse existing connection).
-   * @param {import('discord.js').VoiceBasedChannel} voiceChannel
-   */
   connect(voiceChannel) {
     if (
       this.voiceConnection &&
       this.voiceConnection.state.status !== VoiceConnectionStatus.Destroyed
-    ) {
-      return this.voiceConnection;
-    }
+    ) return this.voiceConnection;
 
     const conn = joinVoiceChannel({
-      channelId:        voiceChannel.id,
-      guildId:          voiceChannel.guild.id,
-      adapterCreator:   voiceChannel.guild.voiceAdapterCreator,
-      selfDeaf:         true,
+      channelId:      voiceChannel.id,
+      guildId:        voiceChannel.guild.id,
+      adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+      selfDeaf:       true,
     });
 
     conn.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
-        // Discord may briefly disconnect during region switches — wait to reconnect
         await Promise.race([
           entersState(conn, VoiceConnectionStatus.Signalling, 5_000),
           entersState(conn, VoiceConnectionStatus.Connecting, 5_000),
@@ -94,40 +121,41 @@ class MusicPlayer {
     return conn;
   }
 
-  setTextChannel(channel) {
-    this._textChannel = channel;
-  }
+  setTextChannel(channel) { this._textChannel = channel; }
 
-  // ---------------------------------------------------------------------------
-  // Playback
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Add a track to the queue.
-   * @param {object} track
-   * @returns {number} 1-based queue position
-   */
   enqueue(track) {
     this.queue.push(track);
     return this.queue.length;
   }
 
-  /**
-   * Start playback from currentIndex. Resolves when audio starts.
-   * @param {object} [trackOverride]  if provided, play this track without touching queue
-   */
   async play(trackOverride) {
     const track = trackOverride || this.queue[this.currentIndex];
     if (!track) return;
 
     this._killCurrentProcess();
 
-    try {
-      const { stream, type, kill } = await YouTube.createAudioStream(track.url);
-      this._currentProcess = { kill };
+    let audioResource = null;
 
-      const resource = createAudioResource(stream, {
-        inputType:    type,
+    // ✅ Try yt-dlp first (more reliable), fall back to Innertube
+    try {
+      audioResource = createYtDlpAudioResource(track.url);
+      console.log(`[MusicPlayer] Using yt-dlp for: ${track.title}`);
+    } catch (ytDlpErr) {
+      console.error(`[MusicPlayer] yt-dlp failed, trying Innertube: ${ytDlpErr.message}`);
+      try {
+        audioResource = await YouTube.createAudioStream(track.url);
+      } catch (ytErr) {
+        console.error(`[MusicPlayer] Innertube also failed: ${ytErr.message}`);
+        this._onTrackEnd(true);
+        return;
+      }
+    }
+
+    try {
+      this._currentProcess = { kill: audioResource.kill };
+
+      const resource = createAudioResource(audioResource.stream, {
+        inputType:    audioResource.type,
         inlineVolume: true,
         metadata:     { track },
       });
@@ -147,7 +175,6 @@ class MusicPlayer {
   skip() {
     this._killCurrentProcess();
     this.audioPlayer.stop(true);
-    // _onTrackEnd will be called by the Idle event handler
   }
 
   async previous() {
@@ -180,7 +207,6 @@ class MusicPlayer {
   resume() {
     if (!this.isPaused) return false;
     this.audioPlayer.unpause();
-    // Shift startTimestamp forward by the paused duration so elapsed stays correct
     if (this.pausedAt && this.startTimestamp) {
       this.startTimestamp += Date.now() - this.pausedAt;
     }
@@ -189,22 +215,13 @@ class MusicPlayer {
     return true;
   }
 
-  /**
-   * Remove a track by 1-based position.
-   * @param {number} oneBased
-   * @returns {object|null} removed track
-   */
   remove(oneBased) {
     const idx = oneBased - 1;
     if (idx < 0 || idx >= this.queue.length) return null;
-
     const [removed] = this.queue.splice(idx, 1);
-
     if (idx < this.currentIndex) {
-      // Track before current was removed — keep playing the same song
       this.currentIndex--;
     } else if (idx === this.currentIndex) {
-      // Currently playing track was removed — skip
       this.currentIndex = Math.min(this.currentIndex, this.queue.length - 1);
       if (this.queue.length > 0) {
         this._killCurrentProcess();
@@ -222,32 +239,18 @@ class MusicPlayer {
     this.isPlaying    = false;
     this.isPaused     = false;
     this.currentIndex = -1;
-    try { this.audioPlayer.stop(true); } catch { /* ignore */ }
-    try { this.voiceConnection?.destroy(); } catch { /* ignore */ }
+    try { this.audioPlayer.stop(true); }      catch {}
+    try { this.voiceConnection?.destroy(); }  catch {}
     this.voiceConnection = null;
   }
 
-  // ---------------------------------------------------------------------------
-  // Progress helpers
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Elapsed playback seconds for the current track.
-   * @returns {number}
-   */
   getElapsed() {
     if (!this.startTimestamp) return 0;
     if (this.isPaused && this.pausedAt) return Math.floor((this.pausedAt - this.startTimestamp) / 1000);
     return Math.floor((Date.now() - this.startTimestamp) / 1000);
   }
 
-  getCurrentTrack() {
-    return this.queue[this.currentIndex] || null;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Internal
-  // ---------------------------------------------------------------------------
+  getCurrentTrack() { return this.queue[this.currentIndex] || null; }
 
   _onTrackEnd(error = false) {
     if (error) {
@@ -264,7 +267,6 @@ class MusicPlayer {
         }
       });
     } else if (this.autoplay) {
-      // Queue exhausted — fetch a related song and keep going
       this._fetchAndPlayRelated();
     } else {
       this.isPlaying    = false;
@@ -278,17 +280,13 @@ class MusicPlayer {
     if (!lastTrack) { this._startInactivityTimer(); return; }
 
     try {
-      // Search for songs similar to the last track
       const query   = `${lastTrack.title} ${lastTrack.uploader}`;
-      const results = await YtDlp.search(query, 10);
-
-      // Exclude URLs already in the queue to avoid repeats
+      const results = await YtDlp.search(query, 10); // ✅ fix: was undefined before
       const queued  = new Set(this.queue.map(t => t.url));
       const pick    = results.filter(r => !queued.has(r.url));
 
       if (!pick.length) { this._startInactivityTimer(); return; }
 
-      // Pick a random result from the filtered list
       const related = pick[Math.floor(Math.random() * pick.length)];
       const track   = { ...related, requestedBy: 'Autoplay' };
 
@@ -298,9 +296,8 @@ class MusicPlayer {
       await this.play();
 
       if (this._textChannel) {
-        const { nowPlayingEmbed } = require('../utils/embeds');
         this._textChannel.send({
-          embeds: [nowPlayingEmbed(track, 0)],
+          embeds:  [nowPlayingEmbed(track, 0)],
           content: '🔀 **Autoplay** — playing a related song',
         }).catch(() => {});
       }
@@ -311,7 +308,7 @@ class MusicPlayer {
   }
 
   _killCurrentProcess() {
-    try { this._currentProcess?.kill(); } catch { /* ignore */ }
+    try { this._currentProcess?.kill(); } catch {}
     this._currentProcess = null;
   }
 
@@ -320,10 +317,11 @@ class MusicPlayer {
     this._inactivityTimer = setTimeout(() => {
       if (!this.isPlaying) {
         if (this._textChannel) {
-          this._textChannel.send({ embeds: [{ description: '👋 Left the voice channel due to inactivity.', color: 0xFEE75C }] }).catch(() => {});
+          this._textChannel.send({
+            embeds: [{ description: '👋 Left the voice channel due to inactivity.', color: 0xFEE75C }],
+          }).catch(() => {});
         }
         this.destroy();
-        // Signal PlayerManager to remove this guild
         this.emit?.('destroyed');
       }
     }, INACTIVITY_TIMEOUT_MS);
