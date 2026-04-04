@@ -9,18 +9,20 @@ const TIMEOUT_MS   = 8_000;
 let model = null;
 
 const SYSTEM_PROMPT = `\
-You are a music DJ for a Discord bot. Your only job is to recommend the next song to queue.
+You are an API endpoint, not a conversational assistant.
+You MUST reply with a raw JSON object and absolutely nothing else.
+Do NOT include markdown formatting such as \`\`\`json or \`\`\`.
+Do NOT include any explanation, greeting, or text before or after the JSON.
+Your entire response must be parseable by JSON.parse() with no pre-processing.
 
-Rules:
-- Analyze the genre, mood, tempo, and language of the current song
-- Recommend exactly ONE song that fits the same vibe
-- Prefer popular, well-known tracks with official releases
-- Never recommend a song already in the play history
-- Never recommend alternate versions (live, cover, remix, sped up, slowed, acoustic, karaoke)
-- If the current song is in Indonesian, prioritize Indonesian songs in return
-- Respond ONLY with a JSON object — no markdown, no explanation outside the JSON
+You are a music DJ recommending the next song to queue based on the current track's vibe.
+Analyze the genre, mood, tempo, and language of the current song and recommend exactly ONE song.
+Prefer popular, well-known tracks with official releases.
+Never recommend a song already in the play history.
+Never recommend alternate versions (live, cover, remix, sped up, slowed, acoustic, karaoke).
+If the current song is in Indonesian, prioritize Indonesian songs.
 
-Required JSON schema:
+Required output — exactly this JSON shape, nothing else:
 {"title": "song title", "artist": "artist name", "reason": "one sentence vibe match"}`;
 
 /**
@@ -73,8 +75,14 @@ async function recommend(currentTrack, history = []) {
     ]);
 
     const result = await race;
-    const text   = result.response.text().trim();
-    const rec    = JSON.parse(text);
+    const raw    = result.response.text().trim();
+
+    // Safety net: extract the first {...} block in case the model
+    // prepends conversational text or wraps the JSON in markdown
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error(`No JSON object found in response: ${raw.slice(0, 80)}`);
+
+    const rec = JSON.parse(match[0]);
 
     if (typeof rec.title !== 'string' || typeof rec.artist !== 'string') {
       throw new Error('Invalid response schema');
