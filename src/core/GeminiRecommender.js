@@ -109,7 +109,12 @@ async function recommendBatch(currentTrack, history = [], count = 3) {
       ),
     ]);
 
-    const recs = JSON.parse(result.response.text());
+    const raw   = result.response.text();
+    const start = raw.indexOf('[');
+    const end   = raw.lastIndexOf(']');
+    if (start === -1 || end === -1) throw new Error(`No JSON array brackets found: ${raw.slice(0, 80)}`);
+
+    const recs = JSON.parse(raw.substring(start, end + 1));
     if (!Array.isArray(recs)) throw new Error('Response is not an array');
 
     // Validate shape and run amnesia check
