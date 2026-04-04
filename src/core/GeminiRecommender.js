@@ -100,8 +100,11 @@ async function recommendBatch(currentTrack, history = [], count = 3) {
 
     const raw = result.response.text().trim();
 
+    // Strip markdown code fences the model sometimes adds despite instructions
+    const cleaned = raw.replace(/```(?:json)?\n?/g, '').trim();
+
     // Safety net: extract the first [...] array block
-    const match = raw.match(/\[[\s\S]*\]/);
+    const match = cleaned.match(/\[[\s\S]*\]/);
     if (!match) throw new Error(`No JSON array in response: ${raw.slice(0, 80)}`);
 
     const recs = JSON.parse(match[0]);
