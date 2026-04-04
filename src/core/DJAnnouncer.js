@@ -1,57 +1,72 @@
 'use strict';
 
-const textToSpeech           = require('@google-cloud/text-to-speech');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const Groq                   = require('groq-sdk');
+const textToSpeech = require('@google-cloud/text-to-speech');
 
-const GEMINI_MODEL   = 'gemini-2.5-flash';
-const GROQ_MODEL     = 'llama3-8b-8192';
-const GEMINI_TIMEOUT = 4_000;
-const GROQ_TIMEOUT   = 5_000;
-const TTS_TIMEOUT    = 8_000;
+const TTS_TIMEOUT = 8_000;
 
-// Voice configs per language — Neural2 female voices
+// Voice configs per language — Wavenet female voices
 const VOICES = {
-  indonesian: { languageCode: 'id-ID', name: 'id-ID-Neural2-A', ssmlGender: 'FEMALE' },
-  english:    { languageCode: 'en-US', name: 'en-US-Neural2-F', ssmlGender: 'FEMALE' },
+  indonesian: { languageCode: 'id-ID', name: 'id-ID-Wavenet-A', ssmlGender: 'FEMALE' },
+  english:    { languageCode: 'en-US', name: 'en-US-Wavenet-F', ssmlGender: 'FEMALE' },
 };
 
-// Tier 3: static template fallbacks
-const TEMPLATES = {
+const DJ_SCRIPTS = {
+  indonesian: [
+    "Dan sekarang, mari kita dengarkan {title} dari {artist}!",
+    "Tetap di sini, lagu selanjutnya ada {title} by {artist}!",
+    "Lanjut terus! Ini dia {title} dari {artist}.",
+    "Buat yang lagi santai, pas banget nih. Kita puterin {title} dari {artist}.",
+    "Jangan kemana-mana, karena abis ini ada {artist} dengan lagunya, {title}.",
+    "Naikin volume kalian! Ini dia {title} dari {artist}.",
+    "Lagu berikutnya pasti udah nggak asing lagi. Langsung aja, {artist} dengan {title}.",
+    "Masih nemenin kalian di sini. Selanjutnya, {title} dibawakan oleh {artist}.",
+    "Siap-siap sing along, karena ini dia {title} dari {artist}.",
+    "Berikutnya ada track asik dari {artist}, judulnya {title}.",
+    "Biar makin semangat, kita dengerin dulu {title} dari {artist}.",
+    "Satu lagu spesial buat kalian, {title} dari {artist}.",
+    "Habis yang satu ini, kita langsung gas ke {title} by {artist}.",
+    "Tetap di frekuensi yang sama, selanjutnya ada {artist} membawakan {title}.",
+    "Lagu yang pas banget buat momen ini. Ini dia {title} dari {artist}.",
+    "Jangan kasih kendor! Langsung aja kita putar {title} dari {artist}.",
+    "Pilihan mantap nih. Kita dengerin bareng-bareng, {artist} dengan {title}.",
+    "Track selanjutnya jatuh kepada... {title} dari {artist}!",
+    "Oke, mari kita nikmati alunan {title} yang dibawakan spesial oleh {artist}.",
+    "Mengudara selanjutnya, sebuah karya dari {artist} berjudul {title}.",
+  ],
   english: [
     "Up next, {title} by {artist}!",
     "Here it comes — {title} from {artist}!",
     "Get ready for {title} by {artist}!",
     "Next up on the playlist, {title} by {artist}!",
-    "You're listening to {title} by {artist}!",
-  ],
-  indonesian: [
-    "Dan sekarang, mari kita dengarkan {title} dari {artist}!",
-    "Tetap di sini, lagu selanjutnya ada {title} dari {artist}!",
-    "Lanjut terus! Ini dia {title} dari {artist}.",
-    "Siap-siap, sekarang giliran {title} dari {artist}!",
-    "Nikmati {title} dari {artist} berikut ini!",
+    "Stay tuned — coming up next is {title} by {artist}.",
+    "Turn it up! Here's {title} from {artist}.",
+    "You won't want to miss this one. {artist} with {title}.",
+    "Keep it locked in. Next track: {title} by {artist}.",
+    "Sing along if you know the words — it's {title} by {artist}.",
+    "A great pick coming your way. {artist} performing {title}.",
+    "Let's keep the energy going with {title} from {artist}.",
+    "A special one for you all — {title} by {artist}.",
+    "No stopping now! Rolling straight into {title} by {artist}.",
+    "Stay on the same frequency. Next up, {artist} with {title}.",
+    "Perfect track for this moment. Here's {title} from {artist}.",
+    "Don't touch that dial! Here comes {title} by {artist}.",
+    "A solid choice. Let's enjoy {artist} with {title}.",
+    "And the next track goes to... {title} by {artist}!",
+    "Sit back and enjoy {title}, brought to you by {artist}.",
+    "On air next — a track by {artist} titled {title}.",
   ],
 };
 
 /** @type {import('@google-cloud/text-to-speech').TextToSpeechClient | null} */
-let ttsClient   = null;
-/** @type {import('@google/generative-ai').GenerativeModel | null} */
-let scriptModel = null;
-/** @type {import('groq-sdk') | null} */
-let groqClient  = null;
+let ttsClient = null;
 
 /**
- * Call once at startup. Silently disables TTS if credentials are missing.
- * Groq is optional — missing key just skips Tier 2.
+ * Call once at startup. Silently disables if TTS credentials are missing.
  */
 function init() {
-  const ttsKey    = process.env.GOOGLE_CLOUD_TTS_KEY;
-  const geminiKey = process.env.GEMINI_API_KEY;
-  const groqKey   = process.env.GROQ_API_KEY;
-
-  if (!ttsKey || !geminiKey) {
-    console.log('[DJAnnounce] Disabled — set GOOGLE_CLOUD_TTS_KEY and GEMINI_API_KEY to enable.');
+  const ttsKey = process.env.GOOGLE_CLOUD_TTS_KEY;
+  if (!ttsKey) {
+    console.log('[DJAnnounce] Disabled — set GOOGLE_CLOUD_TTS_KEY to enable.');
     return;
   }
 
@@ -59,123 +74,44 @@ function init() {
     ttsClient = new textToSpeech.TextToSpeechClient({
       credentials: JSON.parse(ttsKey),
     });
-
-    const genAI = new GoogleGenerativeAI(geminiKey);
-    scriptModel = genAI.getGenerativeModel({
-      model: GEMINI_MODEL,
-      generationConfig: {
-        temperature:     1.2,
-        maxOutputTokens: 60,
-      },
-    });
-
-    if (groqKey) {
-      groqClient = new Groq({ apiKey: groqKey });
-      console.log('[DJAnnounce] Ready (Gemini + Groq fallback).');
-    } else {
-      console.log('[DJAnnounce] Ready (Gemini only — set GROQ_API_KEY to enable Groq fallback).');
-    }
+    console.log('[DJAnnounce] Ready.');
   } catch (err) {
     console.error('[DJAnnounce] Init failed:', err.message);
   }
 }
 
 /**
- * Build the DJ script prompt shared across AI tiers.
+ * Clean a track title/artist for natural TTS reading.
+ * Strips "(Official Video)", "[Lyrics]", "- Topic", etc.
+ * @param {string} text
+ * @returns {string}
  */
-function buildPrompt(track, language) {
-  const lang   = language === 'indonesian' ? 'Indonesian' : 'English';
-  const artist = track.uploader.replace(/\s*-\s*Topic$/i, '').trim();
-  const title  = track.title.replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '').trim();
-  return {
-    prompt:
-      `Write a cool, energetic, and short radio DJ intro for the next song. ` +
-      `Use the ${lang} language. Make it sound like a professional female radio announcer. ` +
-      `Only return the spoken text — no quotes, no labels, no extra punctuation. Max 15 words. ` +
-      `Song: "${title}" by "${artist}".`,
-    artist,
-    title,
-  };
-}
-
-/** Strip surrounding quotes the model sometimes adds. */
-function stripQuotes(text) {
-  return text.trim().replace(/^["'\u201C\u2018]|["'\u201D\u2019]$/g, '').trim();
+function cleanForSpeech(text) {
+  return text
+    .replace(/\s*-\s*Topic$/i, '')
+    .replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '')
+    .replace(/\b(lyrics?|official\s+(music\s+)?video|official\s+audio|music\s+video|audio|mv|hd|4k|visualizer|lyric\s+video|lirik(\s+lagu)?)\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 /**
- * Tier 3: pick a random static template and fill in track metadata.
- */
-function staticFallback(track, language) {
-  const lang      = language === 'indonesian' ? 'indonesian' : 'english';
-  const templates = TEMPLATES[lang];
-  const template  = templates[Math.floor(Math.random() * templates.length)];
-  const artist    = track.uploader.replace(/\s*-\s*Topic$/i, '').trim();
-  const title     = track.title.replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '').trim();
-  return template.replace('{title}', title).replace('{artist}', artist);
-}
-
-/**
- * Generate a DJ script via a 3-tier fallback pipeline:
- *   Tier 1 — Gemini 2.5 Flash   (4 s timeout)
- *   Tier 2 — Groq / Llama 3     (5 s timeout, requires GROQ_API_KEY)
- *   Tier 3 — Static templates   (always succeeds)
- *
+ * Pick a random DJ script template, fill in track metadata, and return the
+ * final spoken string.
  * @param {{ title: string, uploader: string }} track
  * @param {'indonesian' | 'english'} language
- * @returns {Promise<string>}
+ * @returns {string}
  */
-async function generateScript(track, language) {
-  const { prompt } = buildPrompt(track, language);
-
-  // ── Tier 1: Gemini ────────────────────────────────────────────────────────
-  if (scriptModel) {
-    try {
-      const result = await Promise.race([
-        scriptModel.generateContent(prompt),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Gemini timeout')), GEMINI_TIMEOUT)),
-      ]);
-      const text = stripQuotes(result.response.text());
-      if (text) {
-        console.log(`[DJAnnounce] Tier1 (Gemini): "${text}"`);
-        return text;
-      }
-    } catch (err) {
-      const reason = err.message?.includes('429') ? 'rate limited' : err.message;
-      console.warn(`[DJAnnounce] Tier1 failed (${reason}) — trying Groq`);
-    }
-  }
-
-  // ── Tier 2: Groq / Llama 3 ───────────────────────────────────────────────
-  if (groqClient) {
-    try {
-      const completion = await Promise.race([
-        groqClient.chat.completions.create({
-          model:      GROQ_MODEL,
-          max_tokens: 60,
-          temperature: 1.2,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Groq timeout')), GROQ_TIMEOUT)),
-      ]);
-      const text = stripQuotes(completion.choices[0]?.message?.content ?? '');
-      if (text) {
-        console.log(`[DJAnnounce] Tier2 (Groq): "${text}"`);
-        return text;
-      }
-    } catch (err) {
-      console.warn(`[DJAnnounce] Tier2 failed (${err.message}) — using static template`);
-    }
-  }
-
-  // ── Tier 3: Static template ───────────────────────────────────────────────
-  const text = staticFallback(track, language);
-  console.log(`[DJAnnounce] Tier3 (static): "${text}"`);
-  return text;
+function generateScript(track, language) {
+  const scripts  = DJ_SCRIPTS[language] ?? DJ_SCRIPTS.english;
+  const template = scripts[Math.floor(Math.random() * scripts.length)];
+  const title    = cleanForSpeech(track.title);
+  const artist   = cleanForSpeech(track.uploader);
+  return template.replace(/\{title\}/g, title).replace(/\{artist\}/g, artist);
 }
 
 /**
- * Convert a DJ script to OGG Opus audio via Google Cloud TTS.
+ * Convert a script string to OGG Opus audio via Google Cloud TTS.
  * @param {string} text
  * @param {'indonesian' | 'english'} language
  * @returns {Promise<Buffer>}
@@ -196,17 +132,18 @@ async function generateTTS(text, language) {
 }
 
 /**
- * Full pipeline: generate script → synthesise TTS → return audio Buffer.
- * Returns null only if TTS itself fails (script generation always succeeds via Tier 3).
+ * Full pipeline: pick a random script → synthesise TTS → return audio Buffer.
+ * Returns null if TTS fails so the caller can skip the intro gracefully.
  * @param {{ title: string, uploader: string }} track
  * @param {'indonesian' | 'english'} language
  * @returns {Promise<Buffer | null>}
  */
 async function announce(track, language) {
-  if (!ttsClient || !scriptModel) return null;
+  if (!ttsClient) return null;
 
   try {
-    const script = await generateScript(track, language);
+    const script = generateScript(track, language);
+    console.log(`[DJAnnounce] "${script}"`);
     return await generateTTS(script, language);
   } catch (err) {
     console.error('[DJAnnounce] Pipeline error:', err.message);
@@ -215,6 +152,6 @@ async function announce(track, language) {
 }
 
 /** @returns {boolean} */
-function isReady() { return ttsClient !== null && scriptModel !== null; }
+function isReady() { return ttsClient !== null; }
 
 module.exports = { init, announce, isReady };

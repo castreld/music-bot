@@ -235,6 +235,16 @@ class MusicPlayer {
 
   getCurrentTrack() { return this.queue[this.currentIndex] || null; }
 
+  _normalizeTitle(title) {
+    return title
+      .toLowerCase()
+      .replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '')   // strip (anything) and [anything]
+      .replace(/\b(lyrics?|official\s+(lyric\s+)?video|official\s+audio|music\s+video|audio|best\s+version|hd|4k|mv|live)\b/gi, '')
+      .replace(/[^a-z0-9\s]/g, '')               // keep only alphanumerics
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
   _pruneQueue() {
     const KEEP_HISTORY = 15;
     const PRUNE_THRESHOLD = 30;
@@ -356,11 +366,14 @@ class MusicPlayer {
 
         const NON_MUSIC_RE = /\b(episode|interview|news|documentary|podcast|full\s+album|compilation|reaction|review|vlog|highlights|trailer|report)\b/i;
 
+        // Build a normalised title set from the last 15 queued tracks to prevent
+        // the same song appearing again under a different video title/URL
+        const recentCleanTitles = this.queue.slice(-15).map(t => this._normalizeTitle(t.title));
+
         // Over-fetch so filters have enough candidates
         const results = await YouTube.search(`${artist} best songs`, 20);
 
-        const pickedTitles  = new Set(); // titles already chosen in this batch
-        const pickedArtists = new Set(); // artists already chosen in this batch
+        const pickedTitles = new Set(); // normalised titles chosen in this batch
         const picks = [];
 
         for (const r of results) {
@@ -375,17 +388,14 @@ class MusicPlayer {
           // Duration: 2:00 – 7:00
           if (r.duration < 120 || r.duration > 420) continue;
 
-          // Title dedup within this batch (case-insensitive substring match)
-          const normTitle = r.title.toLowerCase();
-          if ([...pickedTitles].some(t => t.includes(normTitle) || normTitle.includes(t))) continue;
-
-          // Artist diversity: max 1 song per uploader in this batch
-          const normArtist = (r.uploader || '').toLowerCase().replace(/\s*-\s*topic$/i, '').trim();
-          if (pickedArtists.has(normArtist)) continue;
+          // Title dedup: check against recent queue history AND current batch
+          const normTitle = this._normalizeTitle(r.title);
+          if (!normTitle) continue;
+          const allSeen = [...recentCleanTitles, ...pickedTitles];
+          if (allSeen.some(t => t.includes(normTitle) || normTitle.includes(t))) continue;
 
           picks.push(r);
           pickedTitles.add(normTitle);
-          pickedArtists.add(normArtist);
         }
 
         for (const pick of picks) {
