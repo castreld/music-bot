@@ -235,7 +235,20 @@ class MusicPlayer {
 
   getCurrentTrack() { return this.queue[this.currentIndex] || null; }
 
+  _pruneQueue() {
+    const KEEP_HISTORY = 15;
+    const PRUNE_THRESHOLD = 30;
+    if (this.currentIndex <= PRUNE_THRESHOLD) return;
+
+    const removeCount = this.currentIndex - KEEP_HISTORY;
+    this.queue.splice(0, removeCount);
+    this.currentIndex -= removeCount;
+    if (this._pendingNextIdx !== null) this._pendingNextIdx -= removeCount;
+  }
+
   _onTrackEnd(error = false) {
+    this._pruneQueue();
+
     if (error) {
       this._sendError(`Failed to play **${this.getCurrentTrack()?.title || 'unknown track'}**. Skipping.`);
     }
@@ -333,22 +346,47 @@ class MusicPlayer {
         } catch { /* skip failed individual lookups */ }
       }
 
-      // ── Fallback: artist text search ─────────────────────────────────────────
+      // ── Fallback: smart artist search ────────────────────────────────────────
       const added = this.queue.filter(t => t.isAutoplay).length;
       if (added === 0) {
-        console.log(`[Autoplay:${this.guildId}] Gemini empty — falling back to artist search`);
+        console.log(`[Autoplay:${this.guildId}] Gemini empty — falling back to smart artist search`);
         const artist = seedTrack.title.includes(' - ')
           ? seedTrack.title.slice(0, seedTrack.title.indexOf(' - ')).trim()
           : seedTrack.uploader.replace(/\s*-\s*Topic$/i, '').trim();
 
         const NON_MUSIC_RE = /\b(episode|interview|news|documentary|podcast|full\s+album|compilation|reaction|review|vlog|highlights|trailer|report)\b/i;
-        const seedDur      = seedTrack.duration || 210;
 
-        const results = await YouTube.search(`${artist} best songs`, 15);
-        const picks   = results.filter(r =>
-          !historySet.has(r.url) && !LIVE_RE.test(r.title) && !NON_MUSIC_RE.test(r.title) &&
-          r.duration >= 90 && r.duration <= Math.min(480, seedDur + 120)
-        ).slice(0, count);
+        // Over-fetch so filters have enough candidates
+        const results = await YouTube.search(`${artist} best songs`, 20);
+
+        const pickedTitles  = new Set(); // titles already chosen in this batch
+        const pickedArtists = new Set(); // artists already chosen in this batch
+        const picks = [];
+
+        for (const r of results) {
+          if (picks.length >= count) break;
+
+          // URL dedup against full queue
+          if (historySet.has(r.url)) continue;
+
+          // Content filters
+          if (LIVE_RE.test(r.title) || NON_MUSIC_RE.test(r.title)) continue;
+
+          // Duration: 2:00 – 7:00
+          if (r.duration < 120 || r.duration > 420) continue;
+
+          // Title dedup within this batch (case-insensitive substring match)
+          const normTitle = r.title.toLowerCase();
+          if ([...pickedTitles].some(t => t.includes(normTitle) || normTitle.includes(t))) continue;
+
+          // Artist diversity: max 1 song per uploader in this batch
+          const normArtist = (r.uploader || '').toLowerCase().replace(/\s*-\s*topic$/i, '').trim();
+          if (pickedArtists.has(normArtist)) continue;
+
+          picks.push(r);
+          pickedTitles.add(normTitle);
+          pickedArtists.add(normArtist);
+        }
 
         for (const pick of picks) {
           this.queue.push({ ...pick, requestedBy: 'Autoplay', isAutoplay: true });
