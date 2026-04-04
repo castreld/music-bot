@@ -10,6 +10,7 @@ const {
   NoSubscriberBehavior,
 } = require('@discordjs/voice');
 const YouTube = require('./YoutubeWrapper');
+const Gemini  = require('./GeminiRecommender');
 const { nowPlayingEmbed, errorEmbed } = require('../utils/embeds');
 
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
@@ -220,75 +221,50 @@ class MusicPlayer {
     if (!lastTrack) { this._startInactivityTimer(); return; }
 
     try {
-      // ── Step 1: Candidate Pool ───────────────────────────────────────────────
-      // Use YouTube's own "Up Next" list (collaborative filtering already applied).
-      // This is far more accurate than any text-search heuristic.
-      const candidates = await YouTube.getRelatedVideos(lastTrack.url);
+      const history    = this.queue.slice(-10);           // last 10 for Gemini context
+      const historySet = new Set(this.queue.map(t => t.url));
 
-      // ── Step 2: Strict Filter ────────────────────────────────────────────────
-      const VERSION_TAGS = [
-        'live', 'cover', 'acoustic', 'reggae', 'remix', 'karaoke',
-        'instrumental', 'sped.?up', 'slowed', '8d', 'lofi', 'lo-fi',
-        'nightcore', 'reverb', 'visualizer', 'mashup',
-      ];
+      const LIVE_RE = /\b(live\s+at|live\s+from|live\s+performance|concert|acoustic|remix|cover|sped.?up|slowed|karaoke|instrumental|nightcore|reverb|visualizer|mashup|lofi|lo-fi|8d)\b/i;
 
-      // If the seed song itself contains a tag, allow that tag in candidates
-      // (e.g. user played an acoustic version → autoplay can queue another acoustic)
-      const seedTagsAllowed = new Set(
-        VERSION_TAGS.filter(tag => new RegExp(`\\b${tag}\\b`, 'i').test(lastTrack.title))
-      );
-      const blockedTags = VERSION_TAGS.filter(t => !seedTagsAllowed.has(t));
-      const VERSION_RE  = new RegExp(`\\b(${blockedTags.join('|')})\\b`, 'i');
+      // ── Primary: Gemini DJ ───────────────────────────────────────────────────
+      let track = null;
 
-      const NON_MUSIC_RE = /\b(episode|ep\.\s*\d|interview|news|documentary|podcast|full\s+album|compilation|reaction|review|vlog|highlights|trailer|behind\s+the\s+scenes|report|talk\s+show)\b/i;
+      const rec = await Gemini.recommend(lastTrack, history);
+      if (rec) {
+        const result = await YouTube.findBestTrack(`${rec.artist} ${rec.title}`);
+        if (result && !historySet.has(result.url) && !LIVE_RE.test(result.title)) {
+          track = { ...result, requestedBy: 'Autoplay' };
+        }
+      }
 
-      // Duration gate: within ±2 min of seed, AND must be between 1:30 – 8:00
-      const seedDur  = lastTrack.duration || 210;
-      const MIN_DUR  = Math.max(90,  seedDur - 120);
-      const MAX_DUR  = Math.min(480, seedDur + 120);
+      // ── Fallback: artist text search ─────────────────────────────────────────
+      if (!track) {
+        console.log(`[Autoplay:${this.guildId}] Falling back to artist search`);
 
-      const history = new Set(this.queue.map(t => t.url));
+        const artist = lastTrack.title.includes(' - ')
+          ? lastTrack.title.slice(0, lastTrack.title.indexOf(' - ')).trim()
+          : lastTrack.uploader.replace(/\s*-\s*Topic$/i, '').trim();
 
-      const filtered = candidates.filter(r => {
-        if (history.has(r.url))           return false; // already queued / played
-        if (VERSION_RE.test(r.title))     return false; // blocked version type
-        if (NON_MUSIC_RE.test(r.title))   return false; // non-music content
-        if (r.duration < MIN_DUR || r.duration > MAX_DUR) return false; // wrong length
-        if (r.viewCount > 0 && r.viewCount < 100_000)     return false; // too obscure
-        return true;
-      });
+        const results = await YouTube.search(`${artist} best songs`, 15);
 
-      if (!filtered.length) { this._startInactivityTimer(); return; }
+        const NON_MUSIC_RE = /\b(episode|interview|news|documentary|podcast|full\s+album|compilation|reaction|review|vlog|highlights|trailer|report|talk\s+show)\b/i;
+        const seedDur      = lastTrack.duration || 210;
 
-      // ── Step 3: Score & Select ───────────────────────────────────────────────
-      const seedArtist = lastTrack.uploader.replace(/\s*-\s*Topic$/i, '').trim().toLowerCase();
+        const candidates = results.filter(r =>
+          !historySet.has(r.url)        &&
+          !LIVE_RE.test(r.title)        &&
+          !NON_MUSIC_RE.test(r.title)   &&
+          r.duration >= 90              &&
+          r.duration <= Math.min(480, seedDur + 120)
+        );
 
-      const score = r => {
-        let s = 0;
-        const u = r.uploader;
-        const ul = u.toLowerCase();
-        const tl = r.title.toLowerCase();
+        if (candidates.length) {
+          const pick = candidates[Math.floor(Math.random() * Math.min(5, candidates.length))];
+          track = { ...pick, requestedBy: 'Autoplay' };
+        }
+      }
 
-        // Official channel bonus
-        if (/vevo$/i.test(u) || /official/i.test(u))              s += 30;
-        // Same artist bonus
-        if (ul.replace(/\s*-\s*topic$/i, '').trim() === seedArtist) s += 20;
-        // Prefer clean audio/lyric uploads (no intros)
-        if (/\b(lyric[s]?|official\s+audio)\b/i.test(tl))         s += 10;
-        // Slight penalty for MVs (may have story intro)
-        if (/\b(official\s+)?(music\s+)?video\b|\bmv\b/i.test(tl)) s -=  5;
-
-        return s;
-      };
-
-      // Pick randomly from top 3 to stay varied without sacrificing quality
-      const top = filtered
-        .map(r => ({ r, s: score(r) }))
-        .sort((a, b) => b.s - a.s)
-        .slice(0, 3);
-
-      const related = top[Math.floor(Math.random() * top.length)].r;
-      const track   = { ...related, requestedBy: 'Autoplay' };
+      if (!track) { this._startInactivityTimer(); return; }
 
       this.queue.push(track);
       this.currentIndex = this.queue.length - 1;

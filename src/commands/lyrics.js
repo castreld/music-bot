@@ -2,6 +2,7 @@
 
 const { SlashCommandBuilder } = require('discord.js');
 const PlayerManager = require('../core/PlayerManager');
+const Gemini        = require('../core/GeminiRecommender');
 const { lyricsEmbeds, errorEmbed } = require('../utils/embeds');
 
 /**
@@ -51,10 +52,14 @@ module.exports = {
 
     let lyrics = null;
     try {
+      // Primary: lyrics.ovh
       lyrics = await fetchLyrics(artist, title);
-      // If the split gave us an artist but returned nothing, retry with full title and no artist
-      if (!lyrics && artist) {
-        lyrics = await fetchLyrics('', rawTitle);
+      if (!lyrics && artist) lyrics = await fetchLyrics('', rawTitle);
+
+      // Fallback: Gemini
+      if (!lyrics) {
+        console.log(`[lyrics] lyrics.ovh failed, trying Gemini for "${rawTitle}"`);
+        lyrics = await Gemini.getLyrics(artist || rawTitle, title || rawTitle);
       }
     } catch (err) {
       console.error('[lyrics]', err.message);
