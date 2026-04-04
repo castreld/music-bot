@@ -1,6 +1,6 @@
 'use strict';
 
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenerativeAI, SchemaType } = require('@google/generative-ai');
 
 const MODEL        = 'gemini-2.5-flash';
 const TIMEOUT_MS   = 8_000;
@@ -40,8 +40,19 @@ function init() {
     systemInstruction: SYSTEM_PROMPT,
     generationConfig: {
       responseMimeType: 'application/json',
-      temperature:      1.0,   // creative but not chaotic
-      maxOutputTokens:  256,
+      responseSchema: {
+        type: SchemaType.ARRAY,
+        items: {
+          type: SchemaType.OBJECT,
+          properties: {
+            title:  { type: SchemaType.STRING },
+            artist: { type: SchemaType.STRING },
+          },
+          required: ['title', 'artist'],
+        },
+      },
+      temperature:     1.0,
+      maxOutputTokens: 256,
     },
   });
   console.log('[Gemini] Ready.');
@@ -98,16 +109,7 @@ async function recommendBatch(currentTrack, history = [], count = 3) {
       ),
     ]);
 
-    const raw = result.response.text().trim();
-
-    // Strip markdown code fences the model sometimes adds despite instructions
-    const cleaned = raw.replace(/```(?:json)?\n?/g, '').trim();
-
-    // Safety net: extract the first [...] array block
-    const match = cleaned.match(/\[[\s\S]*\]/);
-    if (!match) throw new Error(`No JSON array in response: ${raw.slice(0, 80)}`);
-
-    const recs = JSON.parse(match[0]);
+    const recs = JSON.parse(result.response.text());
     if (!Array.isArray(recs)) throw new Error('Response is not an array');
 
     // Validate shape and run amnesia check
