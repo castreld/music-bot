@@ -21,10 +21,21 @@ module.exports = {
 
     player.autoplay = !player.autoplay;
 
+    if (player.autoplay) {
+      // Eagerly pre-fetch 3 songs so users see the queue fill up immediately
+      player._prefetchAutoplay(3).catch(() => {});
+    } else {
+      // Remove queued autoplay tracks so manual queue is clean
+      const firstAutoplay = player.queue.findIndex(
+        (t, i) => i > player.currentIndex && t.isAutoplay
+      );
+      if (firstAutoplay !== -1) player.queue.splice(firstAutoplay);
+    }
+
     const state = player.autoplay ? 'enabled' : 'disabled';
     const hint  = player.autoplay
-      ? 'Related songs will play automatically when the queue ends.'
-      : 'The bot will stop when the queue ends.';
+      ? 'Fetching upcoming songs — check **/queue** in a moment.'
+      : 'Autoplay songs removed from the queue.';
 
     await interaction.reply({
       embeds: [successEmbed(`Autoplay **${state}**. ${hint}`)],

@@ -45,7 +45,7 @@ module.exports = {
     const player   = PlayerManager.get(interaction.guildId);
     player.setTextChannel(interaction.channel);
 
-    const position = player.enqueue(track);
+    const position = player.priorityEnqueue(track);
     const wasIdle  = !player.isPlaying;
 
     if (wasIdle) {

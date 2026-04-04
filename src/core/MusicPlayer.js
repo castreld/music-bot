@@ -6,11 +6,14 @@ const {
   joinVoiceChannel,
   AudioPlayerStatus,
   VoiceConnectionStatus,
+  StreamType,
   entersState,
   NoSubscriberBehavior,
 } = require('@discordjs/voice');
-const YouTube = require('./YoutubeWrapper');
-const Gemini  = require('./GeminiRecommender');
+const { Readable } = require('stream');
+const YouTube    = require('./YoutubeWrapper');
+const Gemini     = require('./GeminiRecommender');
+const DJAnnouncer = require('./DJAnnouncer');
 const { nowPlayingEmbed, errorEmbed } = require('../utils/embeds');
 
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
@@ -29,6 +32,10 @@ class MusicPlayer {
     this._currentProcess  = null;
     this._inactivityTimer = null;
     this._textChannel     = null;
+    this._prefetching     = false;   // prevents concurrent Gemini fetches
+    this.djAnnounce       = null;    // { enabled, language } or null
+    this._djIntroPlaying  = false;   // true while TTS intro is playing
+    this._pendingNextIdx  = null;    // queue index to play after TTS finishes
 
     this.audioPlayer = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
@@ -40,6 +47,24 @@ class MusicPlayer {
 
     this.audioPlayer.on(AudioPlayerStatus.Idle, () => {
       if (!this.isPlaying) return;
+
+      // TTS intro just finished — immediately start the actual song
+      if (this._djIntroPlaying) {
+        this._djIntroPlaying = false;
+        const idx = this._pendingNextIdx;
+        this._pendingNextIdx = null;
+        this.currentIndex = idx;
+        this.play().then(() => {
+          const track = this.getCurrentTrack();
+          if (track && this._textChannel) {
+            const content = track.isAutoplay ? '🔀 **Autoplay** — playing a related song' : undefined;
+            this._textChannel.send({ embeds: [nowPlayingEmbed(track, 0)], content }).catch(() => {});
+          }
+        });
+        if (this.autoplay) this._replenishAutoplay();
+        return;
+      }
+
       this._onTrackEnd();
     });
 
@@ -81,6 +106,23 @@ class MusicPlayer {
   setTextChannel(channel) { this._textChannel = channel; }
 
   enqueue(track) {
+    this.queue.push(track);
+    return this.queue.length;
+  }
+
+  /**
+   * Insert a user-requested track ahead of any queued autoplay tracks.
+   * If autoplay songs are waiting, the user's song plays before them.
+   * Returns the 1-based queue position where the track was inserted.
+   */
+  priorityEnqueue(track) {
+    const firstAutoplay = this.queue.findIndex(
+      (t, i) => i > this.currentIndex && t.isAutoplay
+    );
+    if (firstAutoplay !== -1) {
+      this.queue.splice(firstAutoplay, 0, track);
+      return firstAutoplay + 1;
+    }
     this.queue.push(track);
     return this.queue.length;
   }
@@ -200,15 +242,45 @@ class MusicPlayer {
 
     const next = this.currentIndex + 1;
     if (next < this.queue.length) {
-      this.currentIndex = next;
-      this.play().then(() => {
-        const track = this.getCurrentTrack();
-        if (track && this._textChannel) {
-          this._textChannel.send({ embeds: [nowPlayingEmbed(track, 0)] }).catch(() => {});
-        }
-      });
+      const nextTrack = this.queue[next];
+      if (this.djAnnounce?.enabled) {
+        // Play TTS intro first; Idle handler takes over when it finishes
+        this._playWithAnnounce(next, nextTrack);
+      } else {
+        this.currentIndex = next;
+        this.play().then(() => {
+          const track = this.getCurrentTrack();
+          if (track && this._textChannel) {
+            const content = track.isAutoplay ? '🔀 **Autoplay** — playing a related song' : undefined;
+            this._textChannel.send({ embeds: [nowPlayingEmbed(track, 0)], content }).catch(() => {});
+          }
+        });
+      }
+      // Replenish autoplay queue in background before it runs dry
+      if (this.autoplay) this._replenishAutoplay();
     } else if (this.autoplay) {
-      this._fetchAndPlayRelated();
+      // Queue ran out — pre-fetch should prevent this, but handle gracefully
+      this._prefetchAutoplay(3).then(() => {
+        const nextAfterFetch = this.currentIndex + 1;
+        if (nextAfterFetch < this.queue.length) {
+          this.currentIndex = nextAfterFetch;
+          this.play().then(() => {
+            const track = this.getCurrentTrack();
+            if (track && this._textChannel) {
+              this._textChannel.send({
+                embeds:  [nowPlayingEmbed(track, 0)],
+                content: '🔀 **Autoplay** — playing a related song',
+              }).catch(() => {});
+            }
+          });
+        } else {
+          this.isPlaying = false;
+          this._startInactivityTimer();
+        }
+      }).catch(() => {
+        this.isPlaying = false;
+        this._startInactivityTimer();
+      });
     } else {
       this.isPlaying    = false;
       this.currentIndex = this.queue.length > 0 ? this.queue.length - 1 : -1;
@@ -216,70 +288,109 @@ class MusicPlayer {
     }
   }
 
-  async _fetchAndPlayRelated() {
-    const lastTrack = this.queue[this.queue.length - 1];
-    if (!lastTrack) { this._startInactivityTimer(); return; }
+  /**
+   * Check remaining autoplay tracks in the queue and fetch more if running low.
+   * Called after every track ends while autoplay is on.
+   */
+  _replenishAutoplay() {
+    const remaining = this.queue
+      .slice(this.currentIndex + 1)
+      .filter(t => t.isAutoplay).length;
+
+    if (remaining <= 1) {
+      this._prefetchAutoplay(3).catch(() => {});
+    }
+  }
+
+  /**
+   * Ask Gemini for `count` song recommendations, resolve each to a YouTube
+   * result, tag them isAutoplay=true, and push them onto the queue.
+   * Falls back to an artist text search if Gemini returns nothing.
+   * @param {number} count
+   */
+  async _prefetchAutoplay(count = 3) {
+    if (this._prefetching) return;
+    this._prefetching = true;
 
     try {
-      const history    = this.queue.slice(-10);           // last 10 for Gemini context
+      const seedTrack  = this.getCurrentTrack() || this.queue[this.queue.length - 1];
+      if (!seedTrack) return;
+
+      const history    = this.queue.slice(-10);
       const historySet = new Set(this.queue.map(t => t.url));
+      const LIVE_RE    = /\b(live\s+at|live\s+from|concert|acoustic|remix|cover|sped.?up|slowed|karaoke|instrumental|nightcore|reverb|visualizer|mashup|lofi|lo-fi|8d)\b/i;
 
-      const LIVE_RE = /\b(live\s+at|live\s+from|live\s+performance|concert|acoustic|remix|cover|sped.?up|slowed|karaoke|instrumental|nightcore|reverb|visualizer|mashup|lofi|lo-fi|8d)\b/i;
+      // ── Primary: Gemini batch ────────────────────────────────────────────────
+      const recs = await Gemini.recommendBatch(seedTrack, history, count);
 
-      // ── Primary: Gemini DJ ───────────────────────────────────────────────────
-      let track = null;
-
-      const rec = await Gemini.recommend(lastTrack, history);
-      if (rec) {
-        const result = await YouTube.findBestTrack(`${rec.artist} ${rec.title}`);
-        if (result && !historySet.has(result.url) && !LIVE_RE.test(result.title)) {
-          track = { ...result, requestedBy: 'Autoplay' };
-        }
+      for (const rec of recs) {
+        try {
+          const result = await YouTube.findBestTrack(`${rec.artist} ${rec.title}`);
+          if (result && !historySet.has(result.url) && !LIVE_RE.test(result.title)) {
+            this.queue.push({ ...result, requestedBy: 'Autoplay', isAutoplay: true });
+            historySet.add(result.url);
+          }
+        } catch { /* skip failed individual lookups */ }
       }
 
       // ── Fallback: artist text search ─────────────────────────────────────────
-      if (!track) {
-        console.log(`[Autoplay:${this.guildId}] Falling back to artist search`);
+      const added = this.queue.filter(t => t.isAutoplay).length;
+      if (added === 0) {
+        console.log(`[Autoplay:${this.guildId}] Gemini empty — falling back to artist search`);
+        const artist = seedTrack.title.includes(' - ')
+          ? seedTrack.title.slice(0, seedTrack.title.indexOf(' - ')).trim()
+          : seedTrack.uploader.replace(/\s*-\s*Topic$/i, '').trim();
 
-        const artist = lastTrack.title.includes(' - ')
-          ? lastTrack.title.slice(0, lastTrack.title.indexOf(' - ')).trim()
-          : lastTrack.uploader.replace(/\s*-\s*Topic$/i, '').trim();
+        const NON_MUSIC_RE = /\b(episode|interview|news|documentary|podcast|full\s+album|compilation|reaction|review|vlog|highlights|trailer|report)\b/i;
+        const seedDur      = seedTrack.duration || 210;
 
         const results = await YouTube.search(`${artist} best songs`, 15);
+        const picks   = results.filter(r =>
+          !historySet.has(r.url) && !LIVE_RE.test(r.title) && !NON_MUSIC_RE.test(r.title) &&
+          r.duration >= 90 && r.duration <= Math.min(480, seedDur + 120)
+        ).slice(0, count);
 
-        const NON_MUSIC_RE = /\b(episode|interview|news|documentary|podcast|full\s+album|compilation|reaction|review|vlog|highlights|trailer|report|talk\s+show)\b/i;
-        const seedDur      = lastTrack.duration || 210;
-
-        const candidates = results.filter(r =>
-          !historySet.has(r.url)        &&
-          !LIVE_RE.test(r.title)        &&
-          !NON_MUSIC_RE.test(r.title)   &&
-          r.duration >= 90              &&
-          r.duration <= Math.min(480, seedDur + 120)
-        );
-
-        if (candidates.length) {
-          const pick = candidates[Math.floor(Math.random() * Math.min(5, candidates.length))];
-          track = { ...pick, requestedBy: 'Autoplay' };
+        for (const pick of picks) {
+          this.queue.push({ ...pick, requestedBy: 'Autoplay', isAutoplay: true });
         }
       }
-
-      if (!track) { this._startInactivityTimer(); return; }
-
-      this.queue.push(track);
-      this.currentIndex = this.queue.length - 1;
-
-      await this.play();
-
-      if (this._textChannel) {
-        this._textChannel.send({
-          embeds:  [nowPlayingEmbed(track, 0)],
-          content: '🔀 **Autoplay** — playing a related song',
-        }).catch(() => {});
-      }
     } catch (err) {
-      console.error(`[MusicPlayer:${this.guildId}] autoplay error:`, err.message);
-      this._startInactivityTimer();
+      console.error(`[MusicPlayer:${this.guildId}] prefetch error:`, err.message);
+    } finally {
+      this._prefetching = false;
+    }
+  }
+
+  /**
+   * Generate a TTS intro for nextTrack and play it in the voice channel.
+   * The Idle handler will detect _djIntroPlaying and immediately start the
+   * actual song when TTS finishes — no gap between announcement and music.
+   * Falls back to playing the song directly if TTS generation fails.
+   */
+  async _playWithAnnounce(nextIndex, nextTrack) {
+    let audioBuffer = null;
+    try {
+      audioBuffer = await DJAnnouncer.announce(nextTrack, this.djAnnounce.language);
+    } catch { /* non-fatal — fall through to direct play */ }
+
+    if (audioBuffer) {
+      this._pendingNextIdx = nextIndex;
+      this._djIntroPlaying = true;
+
+      // Wrap buffer in a Readable stream; @discordjs/voice pipes it through ffmpeg
+      const stream   = Readable.from([audioBuffer]);
+      const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+      this.audioPlayer.play(resource);
+      // Idle handler takes over from here
+    } else {
+      // TTS failed — skip intro and play song immediately
+      this.currentIndex = nextIndex;
+      await this.play();
+      const track = this.getCurrentTrack();
+      if (track && this._textChannel) {
+        const content = track.isAutoplay ? '🔀 **Autoplay** — playing a related song' : undefined;
+        this._textChannel.send({ embeds: [nowPlayingEmbed(track, 0)], content }).catch(() => {});
+      }
     }
   }
 

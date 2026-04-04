@@ -73,7 +73,8 @@ function queueEmbed(queue, currentIndex, page, pageSize = 10) {
     const pos    = start + i;
     const icon   = pos === currentIndex ? '▶' : `${pos + 1}.`;
     const dur    = formatDuration(track.duration);
-    return `${icon} **${truncate(track.title, 60)}** \`[${dur}]\``;
+    const tag    = track.isAutoplay ? ' `🔀 Autoplay`' : '';
+    return `${icon} **${truncate(track.title, 60)}** \`[${dur}]\`${tag}`;
   });
 
   return new EmbedBuilder()

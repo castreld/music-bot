@@ -10,20 +10,20 @@ let model = null;
 
 const SYSTEM_PROMPT = `\
 You are an API endpoint, not a conversational assistant.
-You MUST reply with a raw JSON object and absolutely nothing else.
+You MUST reply with a raw JSON array and absolutely nothing else.
 Do NOT include markdown formatting such as \`\`\`json or \`\`\`.
 Do NOT include any explanation, greeting, or text before or after the JSON.
 Your entire response must be parseable by JSON.parse() with no pre-processing.
 
-You are a music DJ recommending the next song to queue based on the current track's vibe.
-Analyze the genre, mood, tempo, and language of the current song and recommend exactly ONE song.
-Prefer popular, well-known tracks with official releases.
-Never recommend a song already in the play history.
+You are a mainstream radio DJ. Recommend highly popular, top-charting, widely recognized hit songs that match the vibe of the current song.
+DO NOT recommend obscure, unpopular, or B-side tracks.
+Analyze the genre, mood, tempo, and language of the current song.
 Never recommend alternate versions (live, cover, remix, sped up, slowed, acoustic, karaoke).
-If the current song is in Indonesian, prioritize Indonesian songs.
+If the current song is in Indonesian, prioritize popular Indonesian songs.
+Each recommendation must be a completely different song from the others and from the history.
 
-Required output — exactly this JSON shape, nothing else:
-{"title": "song title", "artist": "artist name", "reason": "one sentence vibe match"}`;
+Required output — a JSON array of exactly 3 objects, nothing else:
+[{"title": "song title", "artist": "artist name"}, ...]`;
 
 /**
  * Call once at startup. No-ops silently if GEMINI_API_KEY is not set.
@@ -48,51 +48,84 @@ function init() {
 }
 
 /**
- * Ask Gemini to recommend the next track.
+ * Strip YouTube upload noise from a title so Gemini sees clean song names.
+ * e.g. "Bohemian Rhapsody (Official Music Video) [Lyrics] | HD Audio" → "Bohemian Rhapsody"
+ * @param {string} title
+ * @returns {string}
+ */
+function cleanTitle(title) {
+  return title
+    .replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '')   // remove (anything) and [anything]
+    .replace(/\b(lyrics?|official\s+(music\s+)?video|official\s+audio|music\s+video|audio|mv|hd|4k|visualizer|lyric\s+video|lirik(\s+lagu)?)\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * Ask Gemini for a batch of song recommendations.
  *
  * @param {{ title: string, uploader: string }} currentTrack
- * @param {{ title: string, uploader: string }[]} history  – last N played tracks
- * @returns {Promise<{ title: string, artist: string, reason: string } | null>}
+ * @param {{ title: string, uploader: string }[]} history
+ * @param {number} count  how many songs to request (default 3)
+ * @returns {Promise<{ title: string, artist: string }[]>}  empty array on failure
  */
-async function recommend(currentTrack, history = []) {
-  if (!model) return null;
+async function recommendBatch(currentTrack, history = [], count = 3) {
+  if (!model) return [];
 
-  const historyLines = history.length
-    ? history.map(t => `  - "${t.title}" by "${t.uploader}"`).join('\n')
+  const cleanCurrent = cleanTitle(currentTrack.title);
+  const seedArtist   = currentTrack.uploader.replace(/\s*-\s*Topic$/i, '').trim();
+
+  const cleanHistory = history.map(t => {
+    const artist = t.uploader.replace(/\s*-\s*Topic$/i, '').trim();
+    return `${artist} - ${cleanTitle(t.title)}`;
+  });
+
+  const historyBlock = cleanHistory.length
+    ? cleanHistory.map(s => `  - "${s}"`).join('\n')
     : '  (none)';
 
   const prompt =
-    `Current song: "${currentTrack.title}" by "${currentTrack.uploader}"\n` +
-    `Play history (do NOT repeat these):\n${historyLines}\n\n` +
-    `Recommend the next song:`;
+    `Current song: "${cleanCurrent}" by "${seedArtist}"\n\n` +
+    `CRITICAL: You MUST NOT recommend any song in this history. If you do, the system will crash:\n${historyBlock}\n\n` +
+    `CRITICAL: You MUST NOT recommend the current song "${cleanCurrent}".\n\n` +
+    `Return exactly ${count} different song recommendations as a JSON array:`;
 
   try {
-    const race = Promise.race([
+    const result = await Promise.race([
       model.generateContent(prompt),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Gemini timeout')), TIMEOUT_MS)
       ),
     ]);
 
-    const result = await race;
-    const raw    = result.response.text().trim();
+    const raw = result.response.text().trim();
 
-    // Safety net: extract the first {...} block in case the model
-    // prepends conversational text or wraps the JSON in markdown
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error(`No JSON object found in response: ${raw.slice(0, 80)}`);
+    // Safety net: extract the first [...] array block
+    const match = raw.match(/\[[\s\S]*\]/);
+    if (!match) throw new Error(`No JSON array in response: ${raw.slice(0, 80)}`);
 
-    const rec = JSON.parse(match[0]);
+    const recs = JSON.parse(match[0]);
+    if (!Array.isArray(recs)) throw new Error('Response is not an array');
 
-    if (typeof rec.title !== 'string' || typeof rec.artist !== 'string') {
-      throw new Error('Invalid response schema');
-    }
+    // Validate shape and run amnesia check
+    const recentNorm = [currentTrack, ...history.slice(-3)]
+      .map(t => cleanTitle(t.title).toLowerCase().trim());
 
-    console.log(`[Gemini] Recommends: "${rec.artist} - ${rec.title}" — ${rec.reason}`);
-    return rec;
+    const valid = recs.filter(r => {
+      if (typeof r.title !== 'string' || typeof r.artist !== 'string') return false;
+      const norm = r.title.toLowerCase().trim();
+      if (recentNorm.some(t => t.includes(norm) || norm.includes(t))) {
+        console.warn(`[Gemini] Amnesia — skipping recent song: "${r.title}"`);
+        return false;
+      }
+      return true;
+    });
+
+    console.log(`[Gemini] Batch: ${valid.map(r => `"${r.artist} - ${r.title}"`).join(', ')}`);
+    return valid;
   } catch (err) {
-    console.error('[Gemini] Recommendation failed:', err.message);
-    return null;
+    console.error('[Gemini] Batch recommendation failed:', err.message);
+    return [];
   }
 }
 
@@ -134,4 +167,4 @@ async function getLyrics(artist, title) {
   }
 }
 
-module.exports = { init, recommend, getLyrics };
+module.exports = { init, recommendBatch, getLyrics };

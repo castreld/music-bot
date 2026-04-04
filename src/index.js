@@ -4,11 +4,13 @@
 if (process.env.NODE_ENV !== 'production') require('dotenv').config();
 
 const { Client, Collection, GatewayIntentBits } = require('discord.js');
-const YouTube = require('./core/YoutubeWrapper');
-const Gemini  = require('./core/GeminiRecommender');
+const YouTube     = require('./core/YoutubeWrapper');
+const Gemini      = require('./core/GeminiRecommender');
+const DJAnnouncer = require('./core/DJAnnouncer');
 
 // Initialize services before starting the bot
 Gemini.init();
+DJAnnouncer.init();
 YouTube.init().then(() => startBot()).catch(console.error);
 
 function startBot() {
